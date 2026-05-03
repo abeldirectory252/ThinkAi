@@ -1,0 +1,52 @@
+# PaliGemma 3B configuration
+model:
+  name: "paligemma-3b"
+  repo_id: "google/paligemma-3b-pt-224-128"
+  dtype: "bfloat16"
+
+vision:
+  hidden_size: 1152
+  intermediate_size: 4304
+  num_hidden_layers: 27
+  num_attention_heads: 16
+  image_size: 224
+  patch_size: 14
+  num_patches: 256
+
+text:
+  hidden_size: 2048
+  intermediate_size: 16384
+  num_hidden_layers: 18
+  num_attention_heads: 8
+  num_key_value_heads: 1
+  head_dim: 256
+  vocab_size: 257216        # Gemma vocab + special tokens
+  max_position_embeddings: 8192
+  rms_norm_eps: 1.0e-6
+  rope_theta: 10000.0
+
+projection:
+  in_features: 1152         # vision hidden
+  out_features: 2048         # text hidden
+
+memory:
+  offload_to_cpu: true
+  gpu_layers_budget: 6       # keep N layers on GPU
+  use_kv_cache: true
+  max_cache_len: 512
+  gradient_checkpointing: false
+
+inference:
+  max_new_tokens: 128
+  temperature: 0.7
+  top_k: 40
+  top_p: 0.95
+
+explainability:
+  grad_cam:
+    target_layer: -1         # last ViT encoder layer
+    relu_output: true
+  lime:
+    num_samples: 256
+    num_superpixels: 50
+    kernel_width: 0.25
