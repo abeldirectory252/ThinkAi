@@ -113,11 +113,34 @@ class PaliGemma(BaseModel):
         """Load from a directory containing .safetensors files."""
         dl = HuggingFaceDownloader(repo_id="", save_dir=path)
         state = dl.load_state_dict()
+
+        # ── Diagnostic: print checkpoint architecture ──
+        print("\n" + "=" * 70)
+        print("  CHECKPOINT KEYS (downloaded from HuggingFace)")
+        print("=" * 70)
+        for k, v in sorted(state.items()):
+            print(f"  {k:60s} {list(v.shape)}")
+        print(f"\n  Total: {len(state)} tensors")
+
+        print("\n" + "=" * 70)
+        print("  MODEL KEYS (our architecture)")
+        print("=" * 70)
+        for k, v in sorted(self.state_dict().items()):
+            print(f"  {k:60s} {list(v.shape)}")
+        print(f"\n  Total: {len(self.state_dict())} params")
+        print("=" * 70 + "\n")
+
         missing, unexpected = self.load_state_dict(state, strict=False)
         if missing:
-            logger.warning("Missing keys: %s", missing[:10])
+            print(f"⚠️  Missing keys ({len(missing)}):")
+            for k in missing:
+                print(f"    ✗ {k}")
         if unexpected:
-            logger.warning("Unexpected keys: %s", unexpected[:10])
+            print(f"⚠️  Unexpected keys ({len(unexpected)}):")
+            for k in unexpected:
+                print(f"    ? {k}")
+        if not missing and not unexpected:
+            print("✅ All weights loaded perfectly!")
         logger.info("Loaded %d tensors from %s", len(state), path)
 
     @classmethod
