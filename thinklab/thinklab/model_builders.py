@@ -15,7 +15,7 @@ def build_paligemma(save_dir, config, dtype, device, max_memory_gb=None, **kw):
     vc = config.get("vision_config", {})
     tc = config.get("text_config", {})
 
-    model = PaliGemma(vision_cfg=vc, text_cfg=tc, dtype=dtype, model_type="gemma1")
+    model = PaliGemma(vision_cfg=vc, text_cfg=tc, dtype=dtype)
     _load_and_place(model, save_dir, dtype, device, max_memory_gb)
     return model
 
@@ -27,7 +27,7 @@ def build_medgemma(save_dir, config, dtype, device, max_memory_gb=None, **kw):
     vc = config.get("vision_config", {})
     tc = config.get("text_config", {})
 
-    model = PaliGemma(vision_cfg=vc, text_cfg=tc, dtype=dtype, model_type="gemma3")
+    model = PaliGemma(vision_cfg=vc, text_cfg=tc, dtype=dtype)
     _load_and_place(model, save_dir, dtype, device, max_memory_gb)
     return model
 
@@ -68,7 +68,5 @@ def _load_and_place(model, save_dir, dtype, device, max_memory_gb):
 # ── Register all models on import ──────────────────────────────────
 from .registry import register_model
 
-register_model("paligemma", build_paligemma, arch="gemma1",
-               defaults={"model_type": "gemma1"})
-register_model("medgemma",  build_medgemma,  arch="gemma3",
-               defaults={"model_type": "gemma3"})
+register_model("paligemma", build_paligemma, arch="gemma1", defaults={})
+register_model("medgemma",  build_medgemma,  arch="gemma3", defaults={})
