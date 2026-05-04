@@ -36,15 +36,19 @@ class SigLIPAttention(nn.Module):
         k = self.k_proj(x).reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
 
-        attn_weights = (q @ k.transpose(-2, -1)) * self.scale
-        attn_weights = F.softmax(attn_weights, dim=-1)
-
-        out = (attn_weights @ v).transpose(1, 2).reshape(B, N, C)
-        out = self.out_proj(out)
-
         if output_attentions:
-            return out, attn_weights
-        return out, None
+            # Manual path: materializes full attention matrix (high memory)
+            attn_weights = (q @ k.transpose(-2, -1)) * self.scale
+            attn_weights = F.softmax(attn_weights, dim=-1)
+            out = (attn_weights @ v).transpose(1, 2).reshape(B, N, C)
+        else:
+            # Memory-efficient: never materializes [N, N] matrix
+            out = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
+            out = out.transpose(1, 2).reshape(B, N, C)
+            attn_weights = None
+
+        out = self.out_proj(out)
+        return out, attn_weights
 
 
 class SigLIPMLP(nn.Module):

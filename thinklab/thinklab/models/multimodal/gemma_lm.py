@@ -127,12 +127,23 @@ class GemmaAttention(nn.Module):
             v = v.repeat_interleave(self.kv_groups, dim=1)
 
         scale = self.head_dim ** -0.5
-        attn_w = (q @ k.transpose(-2, -1)) * scale
-        if mask is not None:
-            attn_w = attn_w + mask
-        attn_w = F.softmax(attn_w, dim=-1, dtype=torch.float32).type_as(q)
 
-        out = (attn_w @ v).transpose(1, 2).reshape(B, L, -1)
+        if output_attentions:
+            # Manual path: materializes full attention matrix
+            attn_w = (q @ k.transpose(-2, -1)) * scale
+            if mask is not None:
+                attn_w = attn_w + mask
+            attn_w = F.softmax(attn_w, dim=-1, dtype=torch.float32).type_as(q)
+            out = (attn_w @ v).transpose(1, 2).reshape(B, L, -1)
+        else:
+            # Memory-efficient SDPA
+            attn_mask = mask if mask is not None else None
+            out = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_mask, scale=scale
+            )
+            out = out.transpose(1, 2).reshape(B, L, -1)
+            attn_w = None
+
         out = self.o_proj(out)
 
         if output_attentions:
