@@ -1,8 +1,14 @@
+import re
+from pathlib import Path
 from setuptools import setup, find_packages
+
+# Read version from thinklab/__init__.py (single source of truth)
+init_file = Path(__file__).parent / "thinklab" / "__init__.py"
+version = re.search(r'__version__\s*=\s*"(.+?)"', init_file.read_text()).group(1)
 
 setup(
     name="thinklab",
-    version="0.1.0",
+    version=version,
     packages=find_packages(),
     python_requires=">=3.10",
     install_requires=[
@@ -17,6 +23,7 @@ setup(
         "pyyaml>=6.0",
         "tqdm>=4.65.0",
     ],
-    author="ThinkLab",
-    description="Pure PyTorch AI research framework with model explainability",
+    author="Abel Yohannes",
+    description="Pure PyTorch multimodal AI framework with runtime explainability",
+    url="https://github.com/abeldirectory252/ThinkAi",
 )
