@@ -47,9 +47,33 @@ class InferenceEngine:
     # ── Image preprocessing ─────────────────────────────────────────
     def _preprocess_image(self, image, img_cfg: Optional[ImageConfig] = None):
         if isinstance(image, str):
+            import os
+            if not os.path.exists(image):
+                raise FileNotFoundError(
+                    f"\n{'='*60}\n"
+                    f"  ❌ IMAGE PATH ERROR\n"
+                    f"{'='*60}\n"
+                    f"  The image path you provided does not exist:\n\n"
+                    f"    → \"{image}\"\n\n"
+                    f"  Please verify:\n"
+                    f"    1. The file path is correct and accessible\n"
+                    f"    2. The file extension is valid (.jpg, .png, .dcm)\n"
+                    f"    3. On Kaggle, ensure the dataset is attached\n"
+                    f"       under /kaggle/input/<dataset-name>/\n"
+                    f"{'='*60}"
+                )
             image = Image.open(image).convert("RGB")
         elif isinstance(image, np.ndarray):
             image = Image.fromarray(image).convert("RGB")
+        elif image is None:
+            raise ValueError(
+                f"\n{'='*60}\n"
+                f"  ❌ NO IMAGE PROVIDED\n"
+                f"{'='*60}\n"
+                f"  You must provide an image via image_path= or image=.\n"
+                f"  Supported: file path (str), numpy array, or PIL Image.\n"
+                f"{'='*60}"
+            )
 
         if img_cfg:
             if img_cfg.convert_to_grayscale:
