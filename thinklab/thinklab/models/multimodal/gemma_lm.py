@@ -19,8 +19,10 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        norm = x.float().pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
-        return (x.float() * norm).type_as(x) * (1.0 + self.weight.float())
+        orig_dtype = x.dtype
+        x_f = x.float()
+        norm = x_f.pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
+        return (x_f * norm * (1.0 + self.weight.float())).to(orig_dtype)
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:

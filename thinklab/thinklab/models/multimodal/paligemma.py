@@ -48,7 +48,6 @@ class MultiModalProjector(nn.Module):
         if self.model_type == "gemma3":
             # Norm first, then project: x @ weight
             x = self.mm_soft_emb_norm(x)
-            x = x.to(self.mm_input_projection_weight.dtype)
             x = x @ self.mm_input_projection_weight
             return x
         return self.linear(x)
