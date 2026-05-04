@@ -284,19 +284,53 @@ class PaliGemma(BaseModel):
     ) -> dict:
         dev = pixel_values.device
 
-        # Full forward on prefix
-        out = self.forward(pixel_values, input_ids, output_attentions=output_attentions)
-        logits = out["logits"]
+        # ── Phase 1: Prefill ─────────────────────────────────────────
+        # Vision encode
+        vis_out = self.vision_tower(
+            pixel_values, output_attentions=output_attentions,
+        )
+        image_embeds = self.multi_modal_projector(vis_out["last_hidden_state"])
 
-        generated_ids = []
+        # Text embeddings
+        text_embeds = self.language_model.model.embed_tokens(input_ids)
+        text_embeds = text_embeds * (self.text_hidden ** 0.5)
+
+        # Merge vision + text
+        combined = text_embeds.clone()
+        for b in range(input_ids.shape[0]):
+            img_mask = input_ids[b] == self.image_token_id
+            n_img = img_mask.sum().item()
+            if n_img > 0:
+                combined[b, img_mask] = image_embeds[b, :n_img].to(combined.dtype)
+
+        # Causal mask for prefill
+        prefix_len = combined.shape[1]
+        mask = self._make_causal_mask(prefix_len, prefix_len, combined.dtype, dev)
+
+        # Initialize KV caches
         caches = self.language_model.init_caches(self.num_text_layers)
 
-        # Prefill caches manually is complex; simpler: re-use full output
-        # and generate token-by-token from the last position
+        # Run prefill through all decoder layers (populates caches)
+        h = combined
+        for i, layer in enumerate(self.language_model.model.layers):
+            param_dev = next(layer.parameters()).device
+            if param_dev != dev:
+                h, _ = self.layer_forward_with_offload(
+                    layer, h, mask=mask, cache=caches[i],
+                    target_device=str(dev),
+                )
+            else:
+                h, _ = layer(h, mask, cache=caches[i])
+
+        h = self.language_model.model.norm(h)
+        logits = F.linear(h, self.language_model.model.embed_tokens.weight)
         next_logits = logits[:, -1, :]
 
+        # ── Phase 2: Decode (token-by-token with KV cache) ───────────
+        generated_ids = []
+
         for _ in range(max_new_tokens):
-            # Sample
+            # Sample next token
             if temperature > 0:
                 scaled = next_logits / temperature
                 if top_k > 0:
@@ -315,36 +349,39 @@ class PaliGemma(BaseModel):
             else:
                 next_id = next_logits.argmax(dim=-1, keepdim=True)
 
-            generated_ids.append(next_id.item() if next_id.numel() == 1 else next_id[0, 0].item())
+            token_id = next_id.item() if next_id.numel() == 1 else next_id[0, 0].item()
+            generated_ids.append(token_id)
 
             # Check EOS
-            if generated_ids[-1] == 1:  # EOS
+            if token_id == 1:
                 break
 
-            # Next step: embed new token, run through LM
+            # Embed new token
             new_embed = self.language_model.model.embed_tokens(next_id)
             new_embed = new_embed * (self.text_hidden ** 0.5)
-            all_ids = torch.cat([input_ids, torch.tensor([generated_ids], device=dev)], dim=1)
-            seq_len = all_ids.shape[1]
-            mask = self._make_causal_mask(1, seq_len, new_embed.dtype, dev)
 
+            # Run single token through all layers with cache
+            # No mask needed: 1 query token attending to all cached K,V
             h = new_embed
             for i, layer in enumerate(self.language_model.model.layers):
                 param_dev = next(layer.parameters()).device
                 if param_dev != dev:
                     h, _ = self.layer_forward_with_offload(
-                        layer, h, mask=mask, target_device=str(dev)
+                        layer, h, mask=None, cache=caches[i],
+                        target_device=str(dev),
                     )
                 else:
-                    h, _ = layer(h, mask)
+                    h, _ = layer(h, mask=None, cache=caches[i])
 
             h = self.language_model.model.norm(h)
-            next_logits = F.linear(h[:, -1:, :], self.language_model.model.embed_tokens.weight).squeeze(1)
+            next_logits = F.linear(
+                h, self.language_model.model.embed_tokens.weight
+            ).squeeze(1)
 
         return {
             "generated_ids": generated_ids,
-            "vision_features": out.get("vision_features"),
-            "vision_attentions": out.get("vision_attentions"),
-            "text_attentions": out.get("text_attentions"),
-            "image_embeds": out.get("image_embeds"),
+            "vision_features": vis_out.get("last_hidden_state"),
+            "vision_attentions": vis_out.get("attentions"),
+            "text_attentions": None,
+            "image_embeds": image_embeds,
         }
