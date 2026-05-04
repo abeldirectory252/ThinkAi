@@ -27,18 +27,34 @@ logger = logging.getLogger(__name__)
 
 
 class MultiModalProjector(nn.Module):
-    def __init__(self, vis_dim: int = 1152, txt_dim: int = 2048):
+    """Supports both PaliGemma (Linear) and MedGemma (weight-only + norm) projectors."""
+    def __init__(self, vis_dim: int = 1152, txt_dim: int = 2048,
+                 model_type: str = "gemma1"):
         super().__init__()
-        self.linear = nn.Linear(vis_dim, txt_dim)
+        self.model_type = model_type
+        if model_type == "gemma3":
+            # MedGemma: weight-only projection + soft embedding norm
+            self.mm_input_projection_weight = nn.Parameter(
+                torch.empty(txt_dim, vis_dim)
+            )
+            self.mm_soft_emb_norm = nn.LayerNorm(txt_dim, elementwise_affine=True)
+        else:
+            # PaliGemma: simple Linear
+            self.linear = nn.Linear(vis_dim, txt_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.model_type == "gemma3":
+            x = F.linear(x, self.mm_input_projection_weight)
+            x = self.mm_soft_emb_norm(x)
+            return x
         return self.linear(x)
 
 
 class PaliGemma(BaseModel):
     """
-    Full PaliGemma 3B with memory-aware inference.
-    Weight keys align with HuggingFace checkpoint exactly.
+    Multimodal model supporting both architectures:
+      - model_type="gemma1" → PaliGemma 3B (Gemma 1 decoder)
+      - model_type="gemma3" → MedGemma 4B (Gemma 3 decoder with QK-norm)
     """
 
     def __init__(
@@ -46,8 +62,11 @@ class PaliGemma(BaseModel):
         vision_cfg: Optional[dict] = None,
         text_cfg: Optional[dict] = None,
         dtype: torch.dtype = torch.bfloat16,
+        model_type: str = "gemma1",
     ):
         super().__init__(dtype=dtype)
+        self.model_type = model_type
+        is_gemma3 = model_type == "gemma3"
 
         vc = vision_cfg or {}
         tc = text_cfg or {}
@@ -63,6 +82,7 @@ class PaliGemma(BaseModel):
         self.multi_modal_projector = MultiModalProjector(
             vc.get("hidden_size", 1152),
             tc.get("hidden_size", 2048),
+            model_type=model_type,
         )
         self.language_model = GemmaForCausalLM(
             vocab=tc.get("vocab_size", 257216),
@@ -73,6 +93,8 @@ class PaliGemma(BaseModel):
             head_dim=tc.get("head_dim", 256),
             intermediate=tc.get("intermediate_size", 16384),
             eps=tc.get("rms_norm_eps", 1e-6),
+            use_qk_norm=is_gemma3,
+            use_pre_post_ff_norm=is_gemma3,
         )
 
         self.num_image_tokens = (
@@ -81,6 +103,7 @@ class PaliGemma(BaseModel):
         self.image_token_id = 257152
         self.text_hidden = tc.get("hidden_size", 2048)
         self.num_text_layers = tc.get("num_hidden_layers", 18)
+
 
     # ── Weight loading ──────────────────────────────────────────────
     def load_weights(self, path: Path) -> None:

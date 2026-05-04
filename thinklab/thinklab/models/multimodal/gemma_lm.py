@@ -79,18 +79,25 @@ class KVCache:
 
 class GemmaAttention(nn.Module):
     def __init__(self, hidden: int = 2048, heads: int = 8,
-                 kv_heads: int = 1, head_dim: int = 256):
+                 kv_heads: int = 1, head_dim: int = 256,
+                 use_qk_norm: bool = False, eps: float = 1e-6):
         super().__init__()
         self.num_heads = heads
         self.num_kv_heads = kv_heads
         self.head_dim = head_dim
         self.kv_groups = heads // kv_heads
+        self.use_qk_norm = use_qk_norm
 
         self.q_proj = nn.Linear(hidden, heads * head_dim, bias=False)
         self.k_proj = nn.Linear(hidden, kv_heads * head_dim, bias=False)
         self.v_proj = nn.Linear(hidden, kv_heads * head_dim, bias=False)
         self.o_proj = nn.Linear(heads * head_dim, hidden, bias=False)
         self.rope = RotaryEmbedding(head_dim)
+
+        # Gemma 3: QK-Norm
+        if use_qk_norm:
+            self.q_norm = RMSNorm(head_dim, eps)
+            self.k_norm = RMSNorm(head_dim, eps)
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None,
                 cache: Optional[KVCache] = None,
@@ -99,6 +106,11 @@ class GemmaAttention(nn.Module):
         q = self.q_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, L, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, L, self.num_kv_heads, self.head_dim).transpose(1, 2)
+
+        # Gemma 3: apply QK-norm before RoPE
+        if self.use_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         offset = cache.seq_len if cache else 0
         cos, sin = self.rope(L, offset)
@@ -141,12 +153,20 @@ class GemmaMLP(nn.Module):
 
 class GemmaDecoderLayer(nn.Module):
     def __init__(self, hidden=2048, heads=8, kv_heads=1,
-                 head_dim=256, intermediate=16384, eps=1e-6):
+                 head_dim=256, intermediate=16384, eps=1e-6,
+                 use_qk_norm=False, use_pre_post_ff_norm=False):
         super().__init__()
+        self.use_pre_post_ff_norm = use_pre_post_ff_norm
         self.input_layernorm = RMSNorm(hidden, eps)
-        self.self_attn = GemmaAttention(hidden, heads, kv_heads, head_dim)
+        self.self_attn = GemmaAttention(hidden, heads, kv_heads, head_dim,
+                                        use_qk_norm=use_qk_norm, eps=eps)
         self.post_attention_layernorm = RMSNorm(hidden, eps)
         self.mlp = GemmaMLP(hidden, intermediate)
+
+        # Gemma 3: extra layernorms around MLP
+        if use_pre_post_ff_norm:
+            self.pre_feedforward_layernorm = RMSNorm(hidden, eps)
+            self.post_feedforward_layernorm = RMSNorm(hidden, eps)
 
     def forward(self, x, mask=None, cache=None, output_attentions=False):
         r = x
@@ -155,7 +175,11 @@ class GemmaDecoderLayer(nn.Module):
         x = r + x
         r = x
         x = self.post_attention_layernorm(x)
+        if self.use_pre_post_ff_norm:
+            x = self.pre_feedforward_layernorm(x)
         x = self.mlp(x)
+        if self.use_pre_post_ff_norm:
+            x = self.post_feedforward_layernorm(x)
         x = r + x
         return x, attn
 
@@ -163,11 +187,14 @@ class GemmaDecoderLayer(nn.Module):
 class GemmaModel(nn.Module):
     def __init__(self, vocab=257216, hidden=2048, layers=18,
                  heads=8, kv_heads=1, head_dim=256,
-                 intermediate=16384, eps=1e-6):
+                 intermediate=16384, eps=1e-6,
+                 use_qk_norm=False, use_pre_post_ff_norm=False):
         super().__init__()
         self.embed_tokens = nn.Embedding(vocab, hidden)
         self.layers = nn.ModuleList([
-            GemmaDecoderLayer(hidden, heads, kv_heads, head_dim, intermediate, eps)
+            GemmaDecoderLayer(hidden, heads, kv_heads, head_dim, intermediate, eps,
+                              use_qk_norm=use_qk_norm,
+                              use_pre_post_ff_norm=use_pre_post_ff_norm)
             for _ in range(layers)
         ])
         self.norm = RMSNorm(hidden, eps)
