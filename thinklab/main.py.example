@@ -1,0 +1,145 @@
+"""
+ThinkLab — Production Usage Examples
+"""
+import thinklab
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Example 1: MedGemma — Full Production Config
+# ═══════════════════════════════════════════════════════════════════
+def example_medgemma_production():
+    med = thinklab.load_llm(
+        model_name="google/medgemma-4b-it",
+        token="hf_xxxxx",
+        device="auto",
+        # Output
+        isJsonAsOutput=True,
+        isExplainerEnabled=True,
+        isWebSocEnable=False,
+        # Inference
+        temperature=0.1,
+        top_p=0.95,
+        top_k=50,
+        max_tokens=1024,
+        repetition_penalty=1.1,
+        # Safety
+        safety_filter="strict",
+        clinical_guidelines="acr_2024",
+        differential_enabled=True,
+        # Processing
+        precision="fp16",
+        use_flash_attention=True,
+        # Logging
+        logging_level="INFO",
+        metrics_enabled=True,
+        trace_id="trace_patient_12345",
+        # Medical
+        radiology_specialization=True,
+        anatomy_prior="chest_xray",
+        confidence_threshold=0.7,
+    )
+
+    # ── Production inference with clinical payload ──
+    payload = {
+        "clinical_context": {
+            "patient_demographics": {"age_years": 67, "sex": "M", "bmi": 28.5},
+            "symptoms": [
+                {"symptom": "fever", "duration_days": 3, "severity": "moderate"},
+                {"symptom": "productive_cough", "duration_days": 4, "severity": "moderate"},
+            ],
+            "vital_signs": {
+                "temperature_celsius": 38.5,
+                "heart_rate_bpm": 98,
+                "respiratory_rate": 22,
+                "oxygen_saturation": 94,
+                "blood_pressure": "135/85",
+            },
+            "lab_results": {"wbc": 14.5, "crp_mg_dl": 12.3},
+            "medical_history": {
+                "prior_conditions": ["hypertension", "type_2_diabetes"],
+                "medications": ["lisinopril", "metformin"],
+                "allergies": ["penicillin"],
+            },
+            "reason_for_exam": "Suspected community-acquired pneumonia",
+            "clinical_question": "Does X-ray show pneumonia or alternative?",
+        },
+        "inference_config": {
+            "pathologies_to_check": ["pneumonia", "pleural_effusion", "pneumothorax"],
+            "generate_differential": True,
+            "num_differentials": 3,
+        },
+        "metadata": {
+            "department": "radiology",
+            "facility": "main_hospital_01",
+            "study_id": "XR20260503-001",
+            "priority_level": "stat",
+        },
+    }
+
+    result = med.inference(
+        prompt="Analyze this chest X-ray for pathology",
+        image_path="xray.jpg",
+        payload=payload,
+    )
+
+    # Structured JSON output
+    print(result.to_json())
+    print(f"Request ID:  {result.request_id}")
+    print(f"Latency:     {result.processing_latency_ms}ms")
+    print(f"Speed:       {result.token_speed}")
+    print(f"Clinical:    {result.clinical_context_used}")
+    print(f"Output:      {result.model_output[:200]}...")
+
+    # ── With explainability ──
+    exp = med.explain(
+        prompt="What abnormalities do you see?",
+        image_path="xray.jpg",
+        payload=payload,
+        lime_samples=128,
+    )
+    print(f"Explainability: {exp.explainability}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Example 2: PaliGemma — Simple (no clinical context)
+# ═══════════════════════════════════════════════════════════════════
+def example_paligemma_simple():
+    pali = thinklab.load_llm(
+        model_name="google/paligemma-3b-pt-224-128",
+        token="hf_xxxxx",
+        isExplainerEnabled=False,
+        isJsonAsOutput=True,
+        temperature=0.7,
+    )
+    # No clinical context — PaliGemma is not a medical model
+    result = pali.inference("photo.jpg", "describe this image")
+    print(result.to_json())
+    print(f"clinical_context_used = {result.clinical_context_used}")  # False
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Example 3: Agent Mode
+# ═══════════════════════════════════════════════════════════════════
+def example_agent():
+    model = thinklab.load_llm(
+        model_name="google/medgemma-4b-it",
+        token="hf_xxx",
+        IsAgent=True,
+        isExplainerEnabled=True,
+        device="auto",
+    )
+    agent = model.agent(
+        sandbox_url="http://localhost:8000",
+        sandbox_api_key="your-secret-key",
+        max_steps=15,
+    )
+    result = agent.run("Analyze xray.png for pneumonia and compute opacity %")
+    print(result["answer"])
+    agent.cleanup()
+
+
+if __name__ == "__main__":
+    print("Registered models:", thinklab.list_models())
+    # example_medgemma_production()
+    # example_paligemma_simple()
+    # example_agent()
