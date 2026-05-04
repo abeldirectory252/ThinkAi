@@ -33,19 +33,21 @@ class MultiModalProjector(nn.Module):
         super().__init__()
         self.model_type = model_type
         if model_type == "gemma3":
-            # MedGemma: weight-only projection + soft embedding norm
+            # MedGemma: norm on vision features, then weight-only projection
+            # Checkpoint stores weight as (vis_dim, txt_dim)
+            self.mm_soft_emb_norm = nn.LayerNorm(vis_dim, elementwise_affine=True)
             self.mm_input_projection_weight = nn.Parameter(
-                torch.empty(txt_dim, vis_dim)
+                torch.empty(vis_dim, txt_dim)
             )
-            self.mm_soft_emb_norm = nn.LayerNorm(txt_dim, elementwise_affine=True)
         else:
             # PaliGemma: simple Linear
             self.linear = nn.Linear(vis_dim, txt_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.model_type == "gemma3":
-            x = F.linear(x, self.mm_input_projection_weight)
+            # Norm first, then project: x @ weight
             x = self.mm_soft_emb_norm(x)
+            x = x @ self.mm_input_projection_weight
             return x
         return self.linear(x)
 
