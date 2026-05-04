@@ -266,7 +266,7 @@ class InferenceEngine:
 
         # ── Generate ────────────────────────────────────────────────
         use_temp = temperature
-        need_attn = ecfg is not None and ecfg.method is not None
+        need_attn = ecfg is not None and ecfg.enabled
         with torch.no_grad():
             gen_out = self.model.generate(
                 pv, input_ids,
