@@ -35,7 +35,8 @@ class MultiModalProjector(nn.Module):
         if model_type == "gemma3":
             # MedGemma: norm on vision features, then weight-only projection
             # Checkpoint stores weight as (vis_dim, txt_dim)
-            self.mm_soft_emb_norm = nn.LayerNorm(vis_dim, elementwise_affine=True)
+            from .gemma_lm import RMSNorm
+            self.mm_soft_emb_norm = RMSNorm(vis_dim)
             self.mm_input_projection_weight = nn.Parameter(
                 torch.empty(vis_dim, txt_dim)
             )
