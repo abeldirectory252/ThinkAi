@@ -266,12 +266,14 @@ class InferenceEngine:
 
         # ── Generate ────────────────────────────────────────────────
         use_temp = temperature
+        need_attn = ecfg is not None and ecfg.method is not None
         with torch.no_grad():
             gen_out = self.model.generate(
                 pv, input_ids,
                 max_new_tokens=max_tokens,
                 temperature=use_temp,
                 top_k=top_k, top_p=top_p,
+                output_attentions=need_attn,
             )
 
         text = self.tokenizer.decode(gen_out["generated_ids"])

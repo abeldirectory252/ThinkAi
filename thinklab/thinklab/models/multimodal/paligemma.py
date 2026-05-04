@@ -109,39 +109,37 @@ class PaliGemma(BaseModel):
 
 
     # ── Weight loading ──────────────────────────────────────────────
-    def load_weights(self, path: Path) -> None:
+    def load_weights(self, path: Path, debug: bool = False) -> None:
         """Load from a directory containing .safetensors files."""
         dl = HuggingFaceDownloader(repo_id="", save_dir=path)
         state = dl.load_state_dict()
 
-        # ── Diagnostic: print checkpoint architecture ──
-        print("\n" + "=" * 70)
-        print("  CHECKPOINT KEYS (downloaded from HuggingFace)")
-        print("=" * 70)
-        for k, v in sorted(state.items()):
-            print(f"  {k:60s} {list(v.shape)}")
-        print(f"\n  Total: {len(state)} tensors")
-
-        print("\n" + "=" * 70)
-        print("  MODEL KEYS (our architecture)")
-        print("=" * 70)
-        for k, v in sorted(self.state_dict().items()):
-            print(f"  {k:60s} {list(v.shape)}")
-        print(f"\n  Total: {len(self.state_dict())} params")
-        print("=" * 70 + "\n")
+        if debug:
+            ckpt_keys = set(state.keys())
+            model_keys = set(self.state_dict().keys())
+            print(f"\n📦 Checkpoint: {len(ckpt_keys)} tensors | Model: {len(model_keys)} params")
+            only_ckpt = sorted(ckpt_keys - model_keys)
+            only_model = sorted(model_keys - ckpt_keys)
+            if only_ckpt:
+                print(f"  ⚠️  In checkpoint only ({len(only_ckpt)}):")
+                for k in only_ckpt:
+                    print(f"    ? {k:55s} {list(state[k].shape)}")
+            if only_model:
+                print(f"  ⚠️  In model only ({len(only_model)}):")
+                for k in only_model:
+                    print(f"    ✗ {k}")
+            if not only_ckpt and not only_model:
+                print("  ✅ Perfect key alignment")
 
         missing, unexpected = self.load_state_dict(state, strict=False)
         if missing:
-            print(f"⚠️  Missing keys ({len(missing)}):")
-            for k in missing:
-                print(f"    ✗ {k}")
+            logger.warning("Missing %d keys: %s", len(missing), missing[:5])
         if unexpected:
-            print(f"⚠️  Unexpected keys ({len(unexpected)}):")
-            for k in unexpected:
-                print(f"    ? {k}")
+            logger.warning("Unexpected %d keys: %s", len(unexpected), unexpected[:5])
         if not missing and not unexpected:
-            print("✅ All weights loaded perfectly!")
-        logger.info("Loaded %d tensors from %s", len(state), path)
+            logger.info("✅ All %d weights loaded perfectly from %s", len(state), path)
+        else:
+            logger.info("Loaded %d tensors from %s", len(state), path)
 
     @classmethod
     def from_pretrained(
@@ -282,11 +280,12 @@ class PaliGemma(BaseModel):
         temperature: float = 0.7,
         top_k: int = 40,
         top_p: float = 0.95,
+        output_attentions: bool = False,
     ) -> dict:
         dev = pixel_values.device
 
         # Full forward on prefix
-        out = self.forward(pixel_values, input_ids, output_attentions=True)
+        out = self.forward(pixel_values, input_ids, output_attentions=output_attentions)
         logits = out["logits"]
 
         generated_ids = []
@@ -344,8 +343,8 @@ class PaliGemma(BaseModel):
 
         return {
             "generated_ids": generated_ids,
-            "vision_features": out["vision_features"],
-            "vision_attentions": out["vision_attentions"],
-            "text_attentions": out["text_attentions"],
-            "image_embeds": out["image_embeds"],
+            "vision_features": out.get("vision_features"),
+            "vision_attentions": out.get("vision_attentions"),
+            "text_attentions": out.get("text_attentions"),
+            "image_embeds": out.get("image_embeds"),
         }

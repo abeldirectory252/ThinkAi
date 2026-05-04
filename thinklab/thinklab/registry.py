@@ -137,6 +137,7 @@ def load_llm(
     logger.info("Matched arch: %s", entry["arch"])
 
     builder_kwargs = {**entry["defaults"], **kwargs}
+    builder_kwargs["debug"] = (logging_level == "DEBUG")
     raw_model = entry["builder"](
         save_dir=save_path,
         config=config,

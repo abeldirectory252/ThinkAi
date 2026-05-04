@@ -14,9 +14,10 @@ def build_paligemma(save_dir, config, dtype, device, max_memory_gb=None, **kw):
 
     vc = config.get("vision_config", {})
     tc = config.get("text_config", {})
+    debug = kw.pop("debug", False)
 
     model = PaliGemma(vision_cfg=vc, text_cfg=tc, dtype=dtype, model_type="gemma1")
-    _load_and_place(model, save_dir, dtype, device, max_memory_gb)
+    _load_and_place(model, save_dir, dtype, device, max_memory_gb, debug=debug)
     return model
 
 
@@ -26,17 +27,18 @@ def build_medgemma(save_dir, config, dtype, device, max_memory_gb=None, **kw):
 
     vc = config.get("vision_config", {})
     tc = config.get("text_config", {})
+    debug = kw.pop("debug", False)
 
     model = PaliGemma(vision_cfg=vc, text_cfg=tc, dtype=dtype, model_type="gemma3")
-    _load_and_place(model, save_dir, dtype, device, max_memory_gb)
+    _load_and_place(model, save_dir, dtype, device, max_memory_gb, debug=debug)
     return model
 
 
 # ── Shared weight loading + device placement ────────────────────────
-def _load_and_place(model, save_dir, dtype, device, max_memory_gb):
+def _load_and_place(model, save_dir, dtype, device, max_memory_gb, debug=False):
     from .weights import HuggingFaceDownloader
 
-    model.load_weights(Path(save_dir))
+    model.load_weights(Path(save_dir), debug=debug)
     model = model.to(dtype)
 
     if device == "auto":
