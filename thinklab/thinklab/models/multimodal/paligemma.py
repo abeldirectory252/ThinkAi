@@ -20,6 +20,7 @@ from ...core.base_model import BaseModel
 from ...weights.huggingface import HuggingFaceDownloader
 from .siglip_vit import VisionTower
 from .gemma_lm import GemmaForCausalLM, KVCache
+from .gemma2_lm import Gemma2ForCausalLM
 from .gemma3_lm import Gemma3ForCausalLM
 from .tokenizer import GemmaTokenizer
 from .image_processor import ImageProcessor
@@ -33,7 +34,7 @@ class MultiModalProjector(nn.Module):
                  model_type: str = "gemma1"):
         super().__init__()
         self.model_type = model_type
-        if model_type == "gemma3":
+        if model_type in ("gemma2", "gemma3"):
             # MedGemma: norm on vision features, then weight-only projection
             # Checkpoint stores weight as (vis_dim, txt_dim)
             from .gemma_lm import RMSNorm
@@ -46,7 +47,7 @@ class MultiModalProjector(nn.Module):
             self.linear = nn.Linear(vis_dim, txt_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.model_type == "gemma3":
+        if self.model_type in ("gemma2", "gemma3"):
             # Norm first, then project: x @ weight
             x = self.mm_soft_emb_norm(x)
             x = x @ self.mm_input_projection_weight
@@ -58,7 +59,8 @@ class PaliGemma(BaseModel):
     """
     Multimodal model supporting both architectures:
       - model_type="gemma1" → PaliGemma 3B (Gemma 1 decoder)
-      - model_type="gemma3" → MedGemma 4B (Gemma 3 decoder with QK-norm)
+      - model_type="gemma2" → PaliGemma2 / MedGemma 4B (Gemma 2 decoder, no QK-norm)
+      - model_type="gemma3" → Gemma 3 models (Gemma 3 decoder with QK-norm)
     """
 
     def __init__(
@@ -69,11 +71,21 @@ class PaliGemma(BaseModel):
         model_type: str = "gemma1",
     ):
         super().__init__(dtype=dtype)
-        self.model_type = model_type
-        is_gemma3 = model_type == "gemma3"
-
         vc = vision_cfg or {}
         tc = text_cfg or {}
+
+        # Auto-detect decoder type from text_config.model_type
+        tc_model_type = tc.get("model_type", "")
+        if model_type != "gemma1":  # only override if not explicitly gemma1
+            if tc_model_type == "gemma2":
+                model_type = "gemma2"
+            elif tc_model_type == "gemma3":
+                model_type = "gemma3"
+
+        self.model_type = model_type
+        logger.info("Decoder type: %s (text_config.model_type=%s)", model_type, tc_model_type)
+
+
 
         self.vision_tower = VisionTower(
             hidden=vc.get("hidden_size", 1152),
@@ -88,9 +100,25 @@ class PaliGemma(BaseModel):
             tc.get("hidden_size", 2048),
             model_type=model_type,
         )
-        if is_gemma3:
-            # Handle both 'sliding_window' and 'sliding_window_size' config keys
-            sw = tc.get("sliding_window", tc.get("sliding_window_size", 4096))
+        # Handle both 'sliding_window' and 'sliding_window_size' config keys
+        sw = tc.get("sliding_window", tc.get("sliding_window_size", 4096))
+
+        if model_type == "gemma2":
+            self.language_model = Gemma2ForCausalLM(
+                vocab=tc.get("vocab_size", 262144),
+                hidden=tc.get("hidden_size", 2304),
+                layers=tc.get("num_hidden_layers", 26),
+                heads=tc.get("num_attention_heads", 8),
+                kv_heads=tc.get("num_key_value_heads", 4),
+                head_dim=tc.get("head_dim", 256),
+                intermediate=tc.get("intermediate_size", 9216),
+                eps=tc.get("rms_norm_eps", 1e-6),
+                sliding_window=sw,
+                global_every=tc.get("global_every", 2),
+                softcap=tc.get("attn_logit_softcapping", 50.0),
+                final_logit_softcap=tc.get("final_logit_softcapping", 30.0),
+            )
+        elif model_type == "gemma3":
             self.language_model = Gemma3ForCausalLM(
                 vocab=tc.get("vocab_size", 262144),
                 hidden=tc.get("hidden_size", 2560),
@@ -123,8 +151,9 @@ class PaliGemma(BaseModel):
         self.image_token_id = 257152
         self.text_hidden = tc.get("hidden_size", 2048)
         self.num_text_layers = tc.get("num_hidden_layers", 18)
-        # Store final logit softcap for generate() (Gemma 2 = 30.0, Gemma 3 = None)
-        self.final_logit_softcap = tc.get("final_logit_softcapping", None)
+        # Store final logit softcap for generate()
+        self.final_logit_softcap = tc.get("final_logit_softcapping",
+                                          30.0 if model_type == "gemma2" else None)
 
 
     # ── Weight loading ──────────────────────────────────────────────
