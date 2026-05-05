@@ -29,27 +29,45 @@ logger = logging.getLogger(__name__)
 
 
 class MultiModalProjector(nn.Module):
-    """Supports both PaliGemma (Linear) and MedGemma (weight-only + norm) projectors."""
+    """Supports both PaliGemma (Linear) and MedGemma (weight-only + norm + pool) projectors."""
     def __init__(self, vis_dim: int = 1152, txt_dim: int = 2048,
-                 model_type: str = "gemma1"):
+                 model_type: str = "gemma1", image_size: int = 224,
+                 patch_size: int = 14):
         super().__init__()
         self.model_type = model_type
         if model_type in ("gemma2", "gemma3"):
-            # MedGemma: norm on vision features, then weight-only projection
-            # Checkpoint stores weight as (vis_dim, txt_dim)
+            # MedGemma: norm on vision features, then avg_pool, then weight-only projection
+            # HF architecture: avg_pool(kernel=4) reduces 4096→256 tokens, then project
             from .gemma_lm import RMSNorm
             self.mm_soft_emb_norm = RMSNorm(vis_dim)
             self.mm_input_projection_weight = nn.Parameter(
                 torch.empty(vis_dim, txt_dim)
             )
+            # Average pooling: reduces (image_size/patch_size)² patches by factor of kernel²
+            # For MedGemma: 4096 patches → kernel=4 → 64x64 → 16x16 = 256 tokens
+            patches_per_side = image_size // patch_size  # 64 for 896/14
+            self.kernel_size = 4
+            self.patches_per_image = (patches_per_side // self.kernel_size) ** 2  # 256
+            self.tokens_per_side = patches_per_side // self.kernel_size  # 16
+            self.avg_pool = nn.AvgPool2d(kernel_size=self.kernel_size)
         else:
             # PaliGemma: simple Linear
             self.linear = nn.Linear(vis_dim, txt_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.model_type in ("gemma2", "gemma3"):
-            # Norm first, then project: x @ weight
+            # x: (B, num_patches, vis_dim) e.g. (1, 4096, 1152)
+            B, N, D = x.shape
+            # Norm first
             x = self.mm_soft_emb_norm(x)
+            # Reshape to spatial grid for pooling: (B, D, H, W)
+            side = int(N ** 0.5)  # 64 for 4096 patches
+            x = x.transpose(1, 2).reshape(B, D, side, side)
+            # Average pool: (B, D, 64, 64) → (B, D, 16, 16)
+            x = self.avg_pool(x)
+            # Flatten back: (B, D, 16, 16) → (B, 256, D)
+            x = x.flatten(2).transpose(1, 2)
+            # Project: (B, 256, vis_dim) @ (vis_dim, txt_dim) → (B, 256, txt_dim)
             x = x @ self.mm_input_projection_weight
             return x
         return self.linear(x)
@@ -91,6 +109,8 @@ class PaliGemma(BaseModel):
             vc.get("hidden_size", 1152),
             tc.get("hidden_size", 2048),
             model_type=model_type,
+            image_size=vc.get("image_size", 224),
+            patch_size=vc.get("patch_size", 14),
         )
         # Handle both 'sliding_window' and 'sliding_window_size' config keys
         sw = tc.get("sliding_window", tc.get("sliding_window_size", 4096))
@@ -137,9 +157,16 @@ class PaliGemma(BaseModel):
                 eps=tc.get("rms_norm_eps", 1e-6),
             )
 
-        self.num_image_tokens = (
-            vc.get("image_size", 224) // vc.get("patch_size", 14)
-        ) ** 2
+        if self.model_type == "gemma3":
+            # MedGemma: use mm_tokens_per_image from config (256 after avg_pool)
+            # NOT raw patches (4096 = (896/14)²)
+            raw_patches = (vc.get("image_size", 224) // vc.get("patch_size", 14)) ** 2
+            pool_kernel = getattr(self.multi_modal_projector, 'kernel_size', 4)
+            self.num_image_tokens = raw_patches // (pool_kernel ** 2)
+        else:
+            self.num_image_tokens = (
+                vc.get("image_size", 224) // vc.get("patch_size", 14)
+            ) ** 2
         
         # MedGemma (gemma3) uses 262144 as <image_soft_token>, PaliGemma uses 257152
         self.image_token_id = 262144 if self.model_type == "gemma3" else 257152
