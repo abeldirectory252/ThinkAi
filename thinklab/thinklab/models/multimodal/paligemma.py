@@ -343,7 +343,7 @@ class PaliGemma(BaseModel):
         stop_token_ids: Optional[list] = None,
     ) -> dict:
         dev = pixel_values.device
-        eos_ids = set(stop_token_ids or [1, 107])  # EOS + <end_of_turn>
+        eos_ids = set(stop_token_ids or [1, 106])  # EOS + <end_of_turn>
 
         # ── Phase 1: Prefill ─────────────────────────────────────────
         # Vision encode
