@@ -16,7 +16,7 @@ class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
+        self.weight = nn.Parameter(torch.zeros(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_dtype = x.dtype
@@ -161,7 +161,9 @@ class GemmaMLP(nn.Module):
         self.down_proj = nn.Linear(intermediate, hidden, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        # Gemma uses GELU gating (not SiLU) per the official reference
+        # JAX nn.gelu defaults to approximate=True (tanh); HF uses "gelu_pytorch_tanh"
+        return self.down_proj(F.gelu(self.gate_proj(x), approximate='tanh') * self.up_proj(x))
 
 
 class GemmaDecoderLayer(nn.Module):
@@ -220,6 +222,7 @@ class GemmaModel(nn.Module):
             # Gemma scales embeddings by sqrt(hidden_size)
             h = h * (self.hidden_size ** 0.5)
         else:
+            # inputs_embeds are already scaled by the caller (PaliGemma)
             h = inputs_embeds
 
         all_attn = [] if output_attentions else None

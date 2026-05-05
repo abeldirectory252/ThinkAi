@@ -10,6 +10,9 @@ class Gemma3Attention(nn.Module):
         self.num_heads, self.num_kv_heads, self.head_dim = heads, kv_heads, head_dim
         self.kv_groups = heads // kv_heads
         self.is_sliding, self.sliding_window, self.softcap = is_sliding, sliding_window, softcap
+        # Gemma 3 uses embed_dim // num_heads as the query pre-attention scalar
+        # (not 1/sqrt(head_dim)) — this works with logit soft-capping
+        self.query_pre_attn_scalar = (hidden // heads) ** -0.5
         self.q_proj = nn.Linear(hidden, heads * head_dim, bias=False)
         self.k_proj = nn.Linear(hidden, kv_heads * head_dim, bias=False)
         self.v_proj = nn.Linear(hidden, kv_heads * head_dim, bias=False)
@@ -32,7 +35,7 @@ class Gemma3Attention(nn.Module):
         if self.kv_groups > 1:
             k = k.repeat_interleave(self.kv_groups, dim=1)
             v = v.repeat_interleave(self.kv_groups, dim=1)
-        attn_w = (q @ k.transpose(-2, -1)) * (self.head_dim ** -0.5)
+        attn_w = (q @ k.transpose(-2, -1)) * self.query_pre_attn_scalar
         if self.softcap > 0:
             attn_w = self.softcap * torch.tanh(attn_w / self.softcap)
         if mask is not None: attn_w = attn_w + mask

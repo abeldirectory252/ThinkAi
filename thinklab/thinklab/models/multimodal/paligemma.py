@@ -202,10 +202,23 @@ class PaliGemma(BaseModel):
     # ── Causal mask ─────────────────────────────────────────────────
     @staticmethod
     def _make_causal_mask(q_len: int, kv_len: int, dtype: torch.dtype,
-                          device: torch.device) -> torch.Tensor:
+                          device: torch.device,
+                          num_image_tokens: int = 0) -> torch.Tensor:
+        """Build causal mask with bidirectional attention for image tokens.
+
+        PaliGemma's input is [IMG_0, IMG_1, ..., IMG_255, <bos>, text...].
+        Image tokens must attend to each other bidirectionally.
+        Text tokens are causal (attend to all image + prior text tokens).
+        """
+        # Start with standard causal mask
         mask = torch.full((1, 1, q_len, kv_len), float("-inf"),
                           dtype=dtype, device=device)
         mask = torch.triu(mask, diagonal=kv_len - q_len + 1)
+
+        # Open up bidirectional attention in the image token region
+        if num_image_tokens > 0 and num_image_tokens <= q_len:
+            mask[:, :, :num_image_tokens, :num_image_tokens] = 0.0
+
         return mask
 
     # ── Forward (supports gradient flow for Grad-CAM) ──────────────
@@ -238,9 +251,10 @@ class PaliGemma(BaseModel):
             if n_img > 0:
                 combined[b, img_mask] = image_embeds[b, :n_img].to(combined.dtype)
 
-        # Causal mask
+        # Causal mask (bidirectional for image tokens, causal for text)
         seq_len = combined.shape[1]
-        mask = self._make_causal_mask(seq_len, seq_len, combined.dtype, dev)
+        mask = self._make_causal_mask(seq_len, seq_len, combined.dtype, dev,
+                                      num_image_tokens=self.num_image_tokens)
 
         # LM forward
         h = combined
@@ -303,9 +317,10 @@ class PaliGemma(BaseModel):
             if n_img > 0:
                 combined[b, img_mask] = image_embeds[b, :n_img].to(combined.dtype)
 
-        # Causal mask for prefill
+        # Causal mask for prefill (bidirectional for image tokens, causal for text)
         prefix_len = combined.shape[1]
-        mask = self._make_causal_mask(prefix_len, prefix_len, combined.dtype, dev)
+        mask = self._make_causal_mask(prefix_len, prefix_len, combined.dtype, dev,
+                                      num_image_tokens=self.num_image_tokens)
 
         # Initialize KV caches
         caches = self.language_model.init_caches(self.num_text_layers)
