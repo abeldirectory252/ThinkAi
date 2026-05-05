@@ -140,7 +140,10 @@ class PaliGemma(BaseModel):
         self.num_image_tokens = (
             vc.get("image_size", 224) // vc.get("patch_size", 14)
         ) ** 2
-        self.image_token_id = 257152
+        
+        # MedGemma (gemma3) uses 262144 as <image_soft_token>, PaliGemma uses 257152
+        self.image_token_id = 262144 if self.model_type == "gemma3" else 257152
+        
         self.text_hidden = tc.get("hidden_size", 2048)
         self.num_text_layers = tc.get("num_hidden_layers", 18)
         # Store final logit softcap for generate()

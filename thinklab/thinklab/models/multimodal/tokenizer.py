@@ -50,25 +50,33 @@ class GemmaTokenizer:
         text_ids = self.encode(text, add_bos=True, add_eos=False)
         return image_ids + text_ids
 
+    # MedGemma specific tokens
+    MEDGEMMA_IMG_START = 255999    # <image>
+    MEDGEMMA_IMG_SOFT = 262144     # <image_soft_token>
+    MEDGEMMA_IMG_END = 256000      # <end_of_image>
+
     def build_gemma3_input(
-        self, text: str, num_image_tokens: int = 256,
+        self, text: str, num_image_tokens: int = 4096,
         system_prompt: Optional[str] = None,
     ) -> List[int]:
-        """Build Gemma 3 / MedGemma chat-template input matching HF jinja."""
+        """Build Gemma 3 / MedGemma chat-template input matching HF jinja exactly."""
         # MedGemma prepends the system prompt to the user turn
         prefix = f"{system_prompt}\n\n" if system_prompt else ""
         
         # Build text parts
-        chat_text = f"{self.START_OF_TURN}user\n{prefix}{text}\n"
+        chat_text = f"{self.START_OF_TURN}user\n{prefix}{text}\n\n"
         
-        # Encode so far, with <bos>
+        # Encode text, with <bos>
         ids = self.encode(chat_text, add_bos=True, add_eos=False)
         
-        # Append image tokens (HF template does this when it hits type: image)
-        ids.extend([self.IMAGE_TOKEN_ID] * num_image_tokens)
+        # Append image tokens exactly as HF does:
+        # <image> + (<image_soft_token> * 4096) + <end_of_image>
+        ids.append(self.MEDGEMMA_IMG_START)
+        ids.extend([self.MEDGEMMA_IMG_SOFT] * num_image_tokens)
+        ids.append(self.MEDGEMMA_IMG_END)
         
         # Close the user turn and start the model turn
-        suffix = f"{self.END_OF_TURN}\n{self.START_OF_TURN}model\n"
+        suffix = f"\n\n{self.END_OF_TURN}\n{self.START_OF_TURN}model\n"
         ids.extend(self.encode(suffix, add_bos=False, add_eos=False))
         
         return ids
