@@ -222,26 +222,40 @@ class ThinkLabModel:
 
     # ── Inference (with optional explainability) ────────────────────
     def inference(self, image=None, prompt: str = "",
-                  max_tokens: int = 128, temperature: float = 0.7,
-                  top_k: int = 40, top_p: float = 0.95,
+                  max_tokens: int = 200, temperature: float = 0.7,
+                  top_k: int = 50, top_p: float = 0.9,
+                  do_sample: bool = True,
+                  repetition_penalty: float = 1.1,
                   payload: dict = None, image_path: str = None,
                   explainability: dict = None,
+                  messages: list = None,
+                  system_prompt: str = None,
                   **kwargs):
         """
-        Run inference. Optionally run Grad-CAM / LIME in the same call.
+        Run inference. Supports both simple and HF-style messages API.
+
+        Simple API:
+            model.inference(prompt="Describe this X-ray", image_path="xray.jpg")
+
+        Messages API (HuggingFace-style):
+            model.inference(messages=[
+                {"role": "system", "content": [{"type": "text", "text": "You are an expert radiologist."}]},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Describe this X-ray"},
+                    {"type": "image", "image": "xray.jpg"}
+                ]}
+            ])
 
         Args:
             image: PIL Image, numpy array, or file path
             prompt: text prompt
+            messages: HF-style messages list (overrides prompt/image if provided)
+            system_prompt: system instruction (overridden by messages if provided)
             payload: production payload (clinical context, etc.)
             image_path: alias for image
             explainability: {
                 "enabled": True,
                 "mode": "grad_cam" | "lime" | "both",
-                "lime_samples": 128,
-                "per_class": True,
-                "overlay_alpha": 0.5,
-                "colormap": "jet",
             }
 
         Returns:
@@ -250,14 +264,45 @@ class ThinkLabModel:
                 .explain         → ExplainResult (heatmap images, overlays)
                 .to_json()       → full structured JSON
         """
+        # ── Parse messages if provided ───────────────────────────────
+        if messages:
+            for msg in messages:
+                role = msg.get("role", "")
+                content = msg.get("content", [])
+
+                if role == "system":
+                    # Extract system prompt
+                    if isinstance(content, str):
+                        system_prompt = content
+                    elif isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and item.get("type") == "text":
+                                system_prompt = item["text"]
+
+                elif role == "user":
+                    if isinstance(content, str):
+                        prompt = content
+                    elif isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict):
+                                if item.get("type") == "text":
+                                    prompt = item["text"]
+                                elif item.get("type") == "image":
+                                    img_val = item.get("image")
+                                    if img_val:
+                                        image = img_val
+
         from .inference import InferenceEngine
         engine = InferenceEngine(self)
         actual_image = image_path or image
         return engine.run(
             actual_image, prompt, max_tokens,
             temperature, top_k, top_p,
+            do_sample=do_sample,
+            repetition_penalty=repetition_penalty,
             payload=payload,
             explainability=explainability,
+            system_prompt=system_prompt,
             **kwargs,
         )
 

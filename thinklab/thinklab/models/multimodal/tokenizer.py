@@ -17,6 +17,10 @@ class GemmaTokenizer:
     IMAGE_TOKEN = "<image>"
     IMAGE_TOKEN_ID = 257152   # PaliGemma's image placeholder token id
 
+    # Gemma 3 chat template special tokens
+    START_OF_TURN = "<start_of_turn>"
+    END_OF_TURN = "<end_of_turn>"
+
     def __init__(self, model_path: str | Path):
         self.sp = spm.SentencePieceProcessor()
         self.sp.LoadFromFile(str(model_path))
@@ -41,7 +45,42 @@ class GemmaTokenizer:
     def build_paligemma_input(
         self, text: str, num_image_tokens: int = 256
     ) -> List[int]:
-        """Build input: [IMAGE_TOKENS...] <bos> text_tokens."""
+        """Build PaliGemma 1 input: [IMAGE_TOKENS...] <bos> text_tokens."""
         image_ids = [self.IMAGE_TOKEN_ID] * num_image_tokens
         text_ids = self.encode(text, add_bos=True, add_eos=False)
         return image_ids + text_ids
+
+    def build_gemma3_input(
+        self, text: str, num_image_tokens: int = 256,
+        system_prompt: Optional[str] = None,
+    ) -> List[int]:
+        """Build Gemma 3 / MedGemma chat-template input.
+
+        Format:
+          [IMAGE_TOKENS...] <bos>
+          <start_of_turn>system\\n{system}\\n<end_of_turn>   (optional)
+          <start_of_turn>user\\n{text}<end_of_turn>
+          <start_of_turn>model\\n
+        """
+        image_ids = [self.IMAGE_TOKEN_ID] * num_image_tokens
+
+        # Build chat text
+        parts = []
+        if system_prompt:
+            parts.append(f"{self.START_OF_TURN}system\n{system_prompt}\n{self.END_OF_TURN}\n")
+        parts.append(f"{self.START_OF_TURN}user\n{text}{self.END_OF_TURN}\n")
+        parts.append(f"{self.START_OF_TURN}model\n")
+        chat_text = "".join(parts)
+
+        text_ids = self.encode(chat_text, add_bos=True, add_eos=False)
+        return image_ids + text_ids
+
+    def build_input(
+        self, text: str, num_image_tokens: int = 256,
+        model_type: str = "gemma1",
+        system_prompt: Optional[str] = None,
+    ) -> List[int]:
+        """Unified input builder - auto-selects format by model_type."""
+        if model_type in ("gemma2", "gemma3"):
+            return self.build_gemma3_input(text, num_image_tokens, system_prompt)
+        return self.build_paligemma_input(text, num_image_tokens)

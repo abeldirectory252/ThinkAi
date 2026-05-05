@@ -231,9 +231,10 @@ class InferenceEngine:
     # ═════════════════════════════════════════════════════════════════
     #  MAIN RUN — single entry point for inference + optional explain
     # ═════════════════════════════════════════════════════════════════
-    def run(self, image, prompt, max_tokens=128,
-            temperature=0.7, top_k=40, top_p=0.95,
-            payload=None, explainability=None, **kwargs):
+    def run(self, image, prompt, max_tokens=200,
+            temperature=0.7, top_k=50, top_p=0.9,
+            do_sample=True, repetition_penalty=1.1,
+            payload=None, explainability=None, system_prompt=None, **kwargs):
         """
         Unified inference. Explainability is controlled HERE:
 
@@ -261,7 +262,19 @@ class InferenceEngine:
         )
 
         dev = next(self.model.parameters()).device
-        ids = self.tokenizer.build_paligemma_input(full_prompt)
+        model_type = getattr(self.model, 'model_type', 'gemma1')
+        num_img_tokens = getattr(self.model, 'num_image_tokens', 256)
+
+        # Default system prompt for clinical models (if none provided)
+        if system_prompt is None and self._is_clinical_model():
+            system_prompt = "You are an expert medical imaging specialist. Provide detailed, accurate clinical observations."
+
+        ids = self.tokenizer.build_input(
+            full_prompt,
+            num_image_tokens=num_img_tokens,
+            model_type=model_type,
+            system_prompt=system_prompt,
+        )
         input_ids = torch.tensor([ids], device=dev)
 
         # ── Generate ────────────────────────────────────────────────
@@ -273,7 +286,8 @@ class InferenceEngine:
                 max_new_tokens=max_tokens,
                 temperature=use_temp,
                 top_k=top_k, top_p=top_p,
-                repetition_penalty=getattr(self.config, 'repetition_penalty', 1.1),
+                do_sample=do_sample,
+                repetition_penalty=repetition_penalty,
                 output_attentions=need_attn,
             )
 
