@@ -28,7 +28,7 @@ class ImageProcessor:
             image = Image.fromarray(image).convert("RGB")
 
         image = image.resize(
-            (self.image_size, self.image_size), Image.BICUBIC
+            (self.image_size, self.image_size), Image.BILINEAR
         )
         arr = np.array(image).astype(np.float32) / 255.0
         tensor = torch.from_numpy(arr).permute(2, 0, 1)  # (3, H, W)
