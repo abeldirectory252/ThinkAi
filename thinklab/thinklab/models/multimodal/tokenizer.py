@@ -17,9 +17,19 @@ class GemmaTokenizer:
     IMAGE_TOKEN = "<image>"
     IMAGE_TOKEN_ID = 257152   # PaliGemma's image placeholder token id
 
-    # Gemma 3 chat template special tokens
-    START_OF_TURN = "<start_of_turn>"
-    END_OF_TURN = "<end_of_turn>"
+    # Gemma 3 chat template special token IDs
+    # These are ADDED tokens — SentencePiece does NOT know them.
+    # They MUST be injected as raw IDs, never encoded as text.
+    START_OF_TURN_ID = 105    # <start_of_turn>
+    END_OF_TURN_ID = 106      # <end_of_turn>
+
+    # MedGemma / Gemma 3 image token IDs
+    MEDGEMMA_IMG_START = 255999    # <start_of_image>
+    MEDGEMMA_IMG_SOFT = 262144     # <image_soft_token>
+    MEDGEMMA_IMG_END = 256000      # <end_of_image>
+
+    # Full model vocab (larger than SentencePiece base vocab)
+    MODEL_VOCAB_SIZE = 262145      # 262144 + 1
 
     def __init__(self, model_path: str | Path):
         self.sp = spm.SentencePieceProcessor()
@@ -37,10 +47,32 @@ class GemmaTokenizer:
         return ids
 
     def decode(self, ids: List[int]) -> str:
-        # filter special tokens
-        ids = [i for i in ids if i not in (self.BOS_ID, self.EOS_ID, self.PAD_ID)
-               and i < self.vocab_size]
-        return self.sp.DecodeIds(ids)
+        """Decode token IDs back to text.
+
+        Uses MODEL_VOCAB_SIZE (not SentencePiece vocab size) so that
+        tokens in the extended range (e.g. 256001–262144) are not
+        accidentally filtered out.  Special tokens that SentencePiece
+        cannot decode are mapped to their string names.
+        """
+        SPECIAL = {
+            self.BOS_ID: "",
+            self.EOS_ID: "",
+            self.PAD_ID: "",
+            self.START_OF_TURN_ID: "",
+            self.END_OF_TURN_ID: "",
+            self.MEDGEMMA_IMG_START: "",
+            self.MEDGEMMA_IMG_SOFT: "",
+            self.MEDGEMMA_IMG_END: "",
+        }
+
+        decodable = []
+        for i in ids:
+            if i in SPECIAL:
+                # Flush decodable buffer, then skip special token
+                continue
+            if i < self.vocab_size:
+                decodable.append(i)
+        return self.sp.DecodeIds(decodable)
 
     def build_paligemma_input(
         self, text: str, num_image_tokens: int = 256
@@ -50,35 +82,44 @@ class GemmaTokenizer:
         text_ids = self.encode(text, add_bos=True, add_eos=False)
         return image_ids + text_ids
 
-    # MedGemma specific tokens
-    MEDGEMMA_IMG_START = 255999    # <image>
-    MEDGEMMA_IMG_SOFT = 262144     # <image_soft_token>
-    MEDGEMMA_IMG_END = 256000      # <end_of_image>
-
     def build_gemma3_input(
-        self, text: str, num_image_tokens: int = 4096,
+        self, text: str, num_image_tokens: int = 256,
         system_prompt: Optional[str] = None,
     ) -> List[int]:
-        """Build Gemma 3 / MedGemma chat-template input matching HF jinja exactly."""
-        # MedGemma prepends the system prompt to the user turn
-        prefix = f"{system_prompt}\n\n" if system_prompt else ""
-        
-        # Build text parts
-        chat_text = f"{self.START_OF_TURN}user\n{prefix}{text}\n\n"
-        
-        # Encode text, with <bos>
-        ids = self.encode(chat_text, add_bos=True, add_eos=False)
-        
-        # Append image tokens exactly as HF does:
-        # <image> + (<image_soft_token> * 4096) + <end_of_image>
-        ids.append(self.MEDGEMMA_IMG_START)
+        """Build Gemma 3 / MedGemma chat-template input matching HF exactly.
+
+        Target token sequence (from HF processor debug):
+          <bos> <start_of_turn> user \\n {system} \\n\\n {text} \\n\\n
+          <start_of_image> <img_soft>*N <end_of_image>
+          \\n\\n <end_of_turn> \\n <start_of_turn> model \\n
+
+        CRITICAL: <start_of_turn> / <end_of_turn> are ADDED special
+        tokens that SentencePiece cannot encode.  They must be injected
+        as literal integer IDs.
+        """
+        ids = [self.BOS_ID]                    # <bos>
+        ids.append(self.START_OF_TURN_ID)      # <start_of_turn>
+
+        # Encode the user turn body.
+        # HF concatenates: role + "\\n" + system_prefix + text
+        if system_prompt:
+            body = f"user\n{system_prompt}\n\n{text}\n\n"
+        else:
+            body = f"user\n{text}\n\n"
+        ids.extend(self.sp.EncodeAsIds(body))
+
+        # Image block
+        ids.append(self.MEDGEMMA_IMG_START)                    # <start_of_image>
         ids.extend([self.MEDGEMMA_IMG_SOFT] * num_image_tokens)
-        ids.append(self.MEDGEMMA_IMG_END)
-        
-        # Close the user turn and start the model turn
-        suffix = f"\n\n{self.END_OF_TURN}\n{self.START_OF_TURN}model\n"
-        ids.extend(self.encode(suffix, add_bos=False, add_eos=False))
-        
+        ids.append(self.MEDGEMMA_IMG_END)                      # <end_of_image>
+
+        # Close user turn, open model turn
+        ids.extend(self.sp.EncodeAsIds("\n\n"))                # \n\n
+        ids.append(self.END_OF_TURN_ID)                        # <end_of_turn>
+        ids.extend(self.sp.EncodeAsIds("\n"))                  # \n
+        ids.append(self.START_OF_TURN_ID)                      # <start_of_turn>
+        ids.extend(self.sp.EncodeAsIds("model\n"))             # model\n
+
         return ids
 
     def build_input(

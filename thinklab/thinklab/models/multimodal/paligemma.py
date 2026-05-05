@@ -246,10 +246,12 @@ class PaliGemma(BaseModel):
     @staticmethod
     def _make_causal_mask(q_len: int, kv_len: int, dtype: torch.dtype,
                           device: torch.device,
-                          num_image_tokens: int = 0) -> torch.Tensor:
+                          image_positions: torch.Tensor = None) -> torch.Tensor:
         """Build causal mask with bidirectional attention for image tokens.
 
-        PaliGemma's input is [IMG_0, IMG_1, ..., IMG_255, <bos>, text...].
+        PaliGemma 1: images at prefix  [IMG_0..IMG_255, <bos>, text...]
+        Gemma 3:     images mid-sequence  [<bos>, text..., IMG_0..IMG_255, text...]
+
         Image tokens must attend to each other bidirectionally.
         Text tokens are causal (attend to all image + prior text tokens).
         """
@@ -258,9 +260,12 @@ class PaliGemma(BaseModel):
                           dtype=dtype, device=device)
         mask = torch.triu(mask, diagonal=kv_len - q_len + 1)
 
-        # Open up bidirectional attention in the image token region
-        if num_image_tokens > 0 and num_image_tokens <= q_len:
-            mask[:, :, :num_image_tokens, :num_image_tokens] = 0.0
+        # Open up bidirectional attention among image token positions
+        if image_positions is not None and len(image_positions) > 0:
+            # image_positions is a 1-D tensor of indices where image tokens sit
+            idx = image_positions.long()
+            # All image positions can attend to each other
+            mask[:, :, idx[:, None], idx[None, :]] = 0.0
 
         return mask
 
@@ -296,8 +301,9 @@ class PaliGemma(BaseModel):
 
         # Causal mask (bidirectional for image tokens, causal for text)
         seq_len = combined.shape[1]
+        img_positions = (input_ids[0] == self.image_token_id).nonzero(as_tuple=True)[0]
         mask = self._make_causal_mask(seq_len, seq_len, combined.dtype, dev,
-                                      num_image_tokens=self.num_image_tokens)
+                                      image_positions=img_positions)
 
         # LM forward
         h = combined
@@ -366,8 +372,9 @@ class PaliGemma(BaseModel):
 
         # Causal mask for prefill (bidirectional for image tokens, causal for text)
         prefix_len = combined.shape[1]
+        img_positions = (input_ids[0] == self.image_token_id).nonzero(as_tuple=True)[0]
         mask = self._make_causal_mask(prefix_len, prefix_len, combined.dtype, dev,
-                                      num_image_tokens=self.num_image_tokens)
+                                      image_positions=img_positions)
 
         # Initialize KV caches
         caches = self.language_model.init_caches(self.num_text_layers)

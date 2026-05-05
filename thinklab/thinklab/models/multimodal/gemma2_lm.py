@@ -32,10 +32,9 @@ class Gemma2Attention(nn.Module):
         self.sliding_window = sliding_window
         self.softcap = softcap
 
-        # Gemma 2: query_pre_attn_scalar = embed_dim // num_heads
-        # This is a LARGE value (e.g., 256) — NOT the standard 1/sqrt(head_dim)
-        # The soft-capping via tanh controls the magnitude
-        self.query_pre_attn_scalar = hidden // heads
+        # Gemma 2: query_pre_attn_scalar = (embed_dim // num_heads) ** -0.5
+        # This is the inverse sqrt, matching HF's implementation
+        self.query_pre_attn_scalar = (hidden // heads) ** -0.5
 
         self.q_proj = nn.Linear(hidden, heads * head_dim, bias=False)
         self.k_proj = nn.Linear(hidden, kv_heads * head_dim, bias=False)
@@ -66,8 +65,8 @@ class Gemma2Attention(nn.Module):
             k = k.repeat_interleave(self.kv_groups, dim=1)
             v = v.repeat_interleave(self.kv_groups, dim=1)
 
-        # Gemma 2: scale Q by embed_dim//num_heads BEFORE dot product
-        attn_w = (q * self.query_pre_attn_scalar) @ k.transpose(-2, -1)
+        # Gemma 2: scale attention scores by the pre_attn_scalar
+        attn_w = (q @ k.transpose(-2, -1)) * self.query_pre_attn_scalar
 
         # Attention logit soft-capping
         if self.softcap > 0:
