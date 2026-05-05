@@ -273,7 +273,7 @@ class InferenceEngine:
                 max_new_tokens=max_tokens,
                 temperature=use_temp,
                 top_k=top_k, top_p=top_p,
-                repetition_penalty=getattr(self.wrapper.inference_config, 'repetition_penalty', 1.1),
+                repetition_penalty=getattr(self.config, 'repetition_penalty', 1.1),
                 output_attentions=need_attn,
             )
 
