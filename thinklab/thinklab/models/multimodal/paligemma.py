@@ -20,6 +20,7 @@ from ...core.base_model import BaseModel
 from ...weights.huggingface import HuggingFaceDownloader
 from .siglip_vit import VisionTower
 from .gemma_lm import GemmaForCausalLM, KVCache
+from .gemma3_lm import Gemma3ForCausalLM
 from .tokenizer import GemmaTokenizer
 from .image_processor import ImageProcessor
 
@@ -87,18 +88,34 @@ class PaliGemma(BaseModel):
             tc.get("hidden_size", 2048),
             model_type=model_type,
         )
-        self.language_model = GemmaForCausalLM(
-            vocab=tc.get("vocab_size", 257216),
-            hidden=tc.get("hidden_size", 2048),
-            layers=tc.get("num_hidden_layers", 18),
-            heads=tc.get("num_attention_heads", 8),
-            kv_heads=tc.get("num_key_value_heads", 1),
-            head_dim=tc.get("head_dim", 256),
-            intermediate=tc.get("intermediate_size", 16384),
-            eps=tc.get("rms_norm_eps", 1e-6),
-            use_qk_norm=is_gemma3,
-            use_pre_post_ff_norm=is_gemma3,
-        )
+        if is_gemma3:
+            # Handle both 'sliding_window' and 'sliding_window_size' config keys
+            sw = tc.get("sliding_window", tc.get("sliding_window_size", 4096))
+            self.language_model = Gemma3ForCausalLM(
+                vocab=tc.get("vocab_size", 262144),
+                hidden=tc.get("hidden_size", 2560),
+                layers=tc.get("num_hidden_layers", 34),
+                heads=tc.get("num_attention_heads", 8),
+                kv_heads=tc.get("num_key_value_heads", 4),
+                head_dim=tc.get("head_dim", 256),
+                intermediate=tc.get("intermediate_size", 10240),
+                eps=tc.get("rms_norm_eps", 1e-6),
+                sliding_window=sw,
+                global_every=tc.get("global_every", 4),
+                softcap=tc.get("attn_logit_softcapping", 50.0),
+                final_logit_softcap=tc.get("final_logit_softcapping", None),
+            )
+        else:
+            self.language_model = GemmaForCausalLM(
+                vocab=tc.get("vocab_size", 257216),
+                hidden=tc.get("hidden_size", 2048),
+                layers=tc.get("num_hidden_layers", 18),
+                heads=tc.get("num_attention_heads", 8),
+                kv_heads=tc.get("num_key_value_heads", 1),
+                head_dim=tc.get("head_dim", 256),
+                intermediate=tc.get("intermediate_size", 16384),
+                eps=tc.get("rms_norm_eps", 1e-6),
+            )
 
         self.num_image_tokens = (
             vc.get("image_size", 224) // vc.get("patch_size", 14)
@@ -106,6 +123,8 @@ class PaliGemma(BaseModel):
         self.image_token_id = 257152
         self.text_hidden = tc.get("hidden_size", 2048)
         self.num_text_layers = tc.get("num_hidden_layers", 18)
+        # Store final logit softcap for generate() (Gemma 2 = 30.0, Gemma 3 = None)
+        self.final_logit_softcap = tc.get("final_logit_softcapping", None)
 
 
     # ── Weight loading ──────────────────────────────────────────────
@@ -339,6 +358,8 @@ class PaliGemma(BaseModel):
 
         h = self.language_model.model.norm(h)
         logits = F.linear(h, self.language_model.model.embed_tokens.weight)
+        if self.final_logit_softcap is not None:
+            logits = torch.tanh(logits / self.final_logit_softcap) * self.final_logit_softcap
         next_logits = logits[:, -1, :]
 
         # ── Phase 2: Decode (token-by-token with KV cache) ───────────
@@ -392,6 +413,8 @@ class PaliGemma(BaseModel):
             next_logits = F.linear(
                 h, self.language_model.model.embed_tokens.weight
             ).squeeze(1)
+            if self.final_logit_softcap is not None:
+                next_logits = torch.tanh(next_logits / self.final_logit_softcap) * self.final_logit_softcap
 
         return {
             "generated_ids": generated_ids,

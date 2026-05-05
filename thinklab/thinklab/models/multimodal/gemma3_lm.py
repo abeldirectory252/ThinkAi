@@ -75,10 +75,12 @@ class Gemma3DecoderLayer(nn.Module):
 class Gemma3Model(nn.Module):
     def __init__(self, vocab=262144, hidden=2560, layers=34, heads=8,
                  kv_heads=4, head_dim=256, intermediate=10240, eps=1e-6,
-                 sliding_window=512, global_every=4, softcap=50.0):
+                 sliding_window=512, global_every=4, softcap=50.0,
+                 final_logit_softcap=None):
         super().__init__()
         self.embed_tokens = nn.Embedding(vocab, hidden)
         self.hidden_size = hidden
+        self.final_logit_softcap = final_logit_softcap
         self.layers = nn.ModuleList([
             Gemma3DecoderLayer(hidden, heads, kv_heads, head_dim, intermediate,
                                eps, is_sliding=((i+1) % global_every != 0),
@@ -102,10 +104,18 @@ class Gemma3ForCausalLM(nn.Module):
         super().__init__()
         self.model = Gemma3Model(**kw)
         self.vocab_size = kw.get("vocab", 262144)
+
     def forward(self, input_ids=None, inputs_embeds=None, mask=None,
                 caches=None, output_attentions=False):
         h, attn = self.model(input_ids, inputs_embeds, mask, caches, output_attentions)
-        return F.linear(h, self.model.embed_tokens.weight), attn
-    def init_caches(self): return [KVCache() for _ in self.model.layers]
+        logits = F.linear(h, self.model.embed_tokens.weight)
+        # Apply final logit soft-capping (Gemma 2 uses 30.0, Gemma 3 uses None)
+        if self.model.final_logit_softcap is not None:
+            logits = logits / self.model.final_logit_softcap
+            logits = torch.tanh(logits) * self.model.final_logit_softcap
+        return logits, attn
+
+    def init_caches(self, num_layers=None): return [KVCache() for _ in self.model.layers]
+
     def clear_caches(self, c):
         for x in c: x.clear()
