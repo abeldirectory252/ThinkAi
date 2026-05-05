@@ -36,7 +36,7 @@ class Gemma3Attention(nn.Module):
             k = k.repeat_interleave(self.kv_groups, dim=1)
             v = v.repeat_interleave(self.kv_groups, dim=1)
         attn_w = (q @ k.transpose(-2, -1)) * self.query_pre_attn_scalar
-        if self.softcap > 0:
+        if self.softcap:
             attn_w = self.softcap * torch.tanh(attn_w / self.softcap)
         if mask is not None: attn_w = attn_w + mask
         if self.is_sliding:

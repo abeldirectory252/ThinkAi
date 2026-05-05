@@ -122,7 +122,7 @@ class PaliGemma(BaseModel):
                 eps=tc.get("rms_norm_eps", 1e-6),
                 sliding_window=sw,
                 global_every=tc.get("global_every", 4),
-                softcap=tc.get("attn_logit_softcapping", 50.0),
+                softcap=tc.get("attn_logit_softcapping") or 50.0,
                 final_logit_softcap=tc.get("final_logit_softcapping", None),
             )
         else:
