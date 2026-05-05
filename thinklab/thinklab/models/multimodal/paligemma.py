@@ -74,16 +74,8 @@ class PaliGemma(BaseModel):
         vc = vision_cfg or {}
         tc = text_cfg or {}
 
-        # Auto-detect decoder type from text_config.model_type
-        tc_model_type = tc.get("model_type", "")
-        if model_type != "gemma1":  # only override if not explicitly gemma1
-            if tc_model_type == "gemma2":
-                model_type = "gemma2"
-            elif tc_model_type == "gemma3":
-                model_type = "gemma3"
-
         self.model_type = model_type
-        logger.info("Decoder type: %s (text_config.model_type=%s)", model_type, tc_model_type)
+        logger.info("Decoder type: %s", model_type)
 
 
 
