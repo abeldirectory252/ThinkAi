@@ -29,7 +29,7 @@ def build_medgemma(save_dir, config, dtype, device, max_memory_gb=None, **kw):
     tc = config.get("text_config", {})
     debug = kw.pop("debug", False)
 
-    model = PaliGemma(vision_cfg=vc, text_cfg=tc, dtype=dtype, model_type="gemma2")
+    model = PaliGemma(vision_cfg=vc, text_cfg=tc, dtype=dtype, model_type="gemma3")
     _load_and_place(model, save_dir, dtype, device, max_memory_gb, debug=debug)
     return model
 
