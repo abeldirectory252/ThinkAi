@@ -122,7 +122,7 @@ class PaliGemma(BaseModel):
                 eps=tc.get("rms_norm_eps", 1e-6),
                 sliding_window=sw,
                 global_every=tc.get("global_every", 4),
-                softcap=tc.get("attn_logit_softcapping") or 50.0,
+                softcap=tc.get("attn_logit_softcapping", None),
                 final_logit_softcap=tc.get("final_logit_softcapping", None),
             )
         else:
@@ -409,9 +409,17 @@ class PaliGemma(BaseModel):
                     else:
                         next_logits[0, prev_id] *= repetition_penalty
 
-            # ── Sampling ─────────────────────────────────────────
+            # ── Sampling (float32 for numerical stability) ─────
+            # Cast to float32 to avoid bfloat16 NaN/inf issues
+            logits_f32 = next_logits.float()
+            # Clamp any NaN/inf that leaked from the forward pass
+            logits_f32 = torch.where(
+                torch.isfinite(logits_f32), logits_f32,
+                torch.full_like(logits_f32, -1e9),
+            )
+
             if do_sample and temperature > 0:
-                scaled = next_logits / temperature
+                scaled = logits_f32 / temperature
                 if top_k > 0:
                     tk_vals, _ = torch.topk(scaled, min(top_k, scaled.size(-1)), dim=-1)
                     scaled[scaled < tk_vals[:, -1:]] = float("-inf")
@@ -422,11 +430,18 @@ class PaliGemma(BaseModel):
                     remove[:, 1:] = remove[:, :-1].clone()
                     remove[:, 0] = False
                     sorted_logits[remove] = float("-inf")
-                    scaled = sorted_logits.scatter(1, sorted_idx, sorted_logits)
+                    # Scatter sorted values back to original positions
+                    scaled = torch.zeros_like(scaled).scatter(1, sorted_idx, sorted_logits)
                 probs = F.softmax(scaled, dim=-1)
-                next_id = torch.multinomial(probs, 1)
+                # Clamp to ensure no negative values (floating point artifacts)
+                probs = probs.clamp(min=0.0)
+                # Fallback: if probs still contain NaN/inf or sum to 0, use argmax
+                if not torch.isfinite(probs).all() or probs.sum() == 0:
+                    next_id = logits_f32.argmax(dim=-1, keepdim=True)
+                else:
+                    next_id = torch.multinomial(probs, 1)
             else:
-                next_id = next_logits.argmax(dim=-1, keepdim=True)
+                next_id = logits_f32.argmax(dim=-1, keepdim=True)
 
             token_id = next_id.item() if next_id.numel() == 1 else next_id[0, 0].item()
             generated_ids.append(token_id)
@@ -454,7 +469,7 @@ class PaliGemma(BaseModel):
 
             h = self.language_model.model.norm(h)
             next_logits = F.linear(
-                h, self.language_model.model.embed_tokens.weight
+                h.float(), self.language_model.model.embed_tokens.weight.float()
             ).squeeze(1)
             if self.final_logit_softcap is not None:
                 next_logits = torch.tanh(next_logits / self.final_logit_softcap) * self.final_logit_softcap

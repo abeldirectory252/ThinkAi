@@ -10,9 +10,9 @@ class Gemma3Attention(nn.Module):
         self.num_heads, self.num_kv_heads, self.head_dim = heads, kv_heads, head_dim
         self.kv_groups = heads // kv_heads
         self.is_sliding, self.sliding_window, self.softcap = is_sliding, sliding_window, softcap
-        # Gemma 3 uses embed_dim // num_heads as the query pre-attention scalar
-        # (not 1/sqrt(head_dim)) — this works with logit soft-capping
-        self.query_pre_attn_scalar = (hidden // heads) ** -0.5
+        # Gemma 3 config: query_pre_attn_scalar = head_dim = 256
+        # Scale = head_dim ** -0.5 = 0.0625
+        self.query_pre_attn_scalar = head_dim ** -0.5
         self.q_proj = nn.Linear(hidden, heads * head_dim, bias=False)
         self.k_proj = nn.Linear(hidden, kv_heads * head_dim, bias=False)
         self.v_proj = nn.Linear(hidden, kv_heads * head_dim, bias=False)
