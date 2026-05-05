@@ -54,26 +54,24 @@ class GemmaTokenizer:
         self, text: str, num_image_tokens: int = 256,
         system_prompt: Optional[str] = None,
     ) -> List[int]:
-        """Build Gemma 3 / MedGemma chat-template input.
-
-        Format:
-          [IMAGE_TOKENS...] <bos>
-          <start_of_turn>system\\n{system}\\n<end_of_turn>   (optional)
-          <start_of_turn>user\\n{text}<end_of_turn>
-          <start_of_turn>model\\n
-        """
-        image_ids = [self.IMAGE_TOKEN_ID] * num_image_tokens
-
-        # Build chat text
-        parts = []
-        if system_prompt:
-            parts.append(f"{self.START_OF_TURN}system\n{system_prompt}\n{self.END_OF_TURN}\n")
-        parts.append(f"{self.START_OF_TURN}user\n{text}{self.END_OF_TURN}\n")
-        parts.append(f"{self.START_OF_TURN}model\n")
-        chat_text = "".join(parts)
-
-        text_ids = self.encode(chat_text, add_bos=True, add_eos=False)
-        return image_ids + text_ids
+        """Build Gemma 3 / MedGemma chat-template input matching HF jinja."""
+        # MedGemma prepends the system prompt to the user turn
+        prefix = f"{system_prompt}\n\n" if system_prompt else ""
+        
+        # Build text parts
+        chat_text = f"{self.START_OF_TURN}user\n{prefix}{text}\n"
+        
+        # Encode so far, with <bos>
+        ids = self.encode(chat_text, add_bos=True, add_eos=False)
+        
+        # Append image tokens (HF template does this when it hits type: image)
+        ids.extend([self.IMAGE_TOKEN_ID] * num_image_tokens)
+        
+        # Close the user turn and start the model turn
+        suffix = f"{self.END_OF_TURN}\n{self.START_OF_TURN}model\n"
+        ids.extend(self.encode(suffix, add_bos=False, add_eos=False))
+        
+        return ids
 
     def build_input(
         self, text: str, num_image_tokens: int = 256,
