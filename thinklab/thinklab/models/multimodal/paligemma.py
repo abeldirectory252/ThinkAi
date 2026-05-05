@@ -330,13 +330,17 @@ class PaliGemma(BaseModel):
         self,
         pixel_values: torch.Tensor,
         input_ids: torch.Tensor,
-        max_new_tokens: int = 128,
+        max_new_tokens: int = 200,
         temperature: float = 0.7,
-        top_k: int = 40,
-        top_p: float = 0.95,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.1,
+        do_sample: bool = True,
         output_attentions: bool = False,
+        stop_token_ids: Optional[list] = None,
     ) -> dict:
         dev = pixel_values.device
+        eos_ids = set(stop_token_ids or [1, 107])  # EOS + <end_of_turn>
 
         # ── Phase 1: Prefill ─────────────────────────────────────────
         # Vision encode
@@ -387,12 +391,20 @@ class PaliGemma(BaseModel):
         generated_ids = []
 
         for _ in range(max_new_tokens):
-            # Sample next token
-            if temperature > 0:
+            # ── Repetition penalty ────────────────────────────────
+            if repetition_penalty != 1.0 and generated_ids:
+                for prev_id in set(generated_ids):
+                    if next_logits[0, prev_id] > 0:
+                        next_logits[0, prev_id] /= repetition_penalty
+                    else:
+                        next_logits[0, prev_id] *= repetition_penalty
+
+            # ── Sampling ─────────────────────────────────────────
+            if do_sample and temperature > 0:
                 scaled = next_logits / temperature
                 if top_k > 0:
-                    v, _ = torch.topk(scaled, top_k, dim=-1)
-                    scaled[scaled < v[:, -1:]] = float("-inf")
+                    tk_vals, _ = torch.topk(scaled, min(top_k, scaled.size(-1)), dim=-1)
+                    scaled[scaled < tk_vals[:, -1:]] = float("-inf")
                 if top_p < 1.0:
                     sorted_logits, sorted_idx = torch.sort(scaled, descending=True)
                     cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
@@ -409,8 +421,8 @@ class PaliGemma(BaseModel):
             token_id = next_id.item() if next_id.numel() == 1 else next_id[0, 0].item()
             generated_ids.append(token_id)
 
-            # Check EOS
-            if token_id == 1:
+            # Check EOS / stop tokens
+            if token_id in eos_ids:
                 break
 
             # Embed new token
