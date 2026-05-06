@@ -1,74 +1,83 @@
-"""Auto-register all supported model builders."""
+"""
+Auto-register all supported model builders.
+
+Discovery system:
+  1. Scans models/multimodal/ and models/llm/ for model packages
+  2. Each model package has a builder.py with REGISTRY_PATTERN, ARCH, and a build function
+  3. Builders are loaded via importlib.util (supports hyphenated directory names)
+  4. Each builder auto-registers with the ThinkLab registry
+
+Directory structure mirrors HuggingFace repo paths:
+  models/multimodal/google/medgemma-4b-it/builder.py
+  models/multimodal/google/paligemma-3b-mix-224/builder.py
+"""
+import importlib.util
 import logging
-import json
-import torch
+import sys
 from pathlib import Path
 
 logger = logging.getLogger("thinklab.builders")
 
 
-# ── PaliGemma builder ───────────────────────────────────────────────
-def build_paligemma(save_dir, config, dtype, device, max_memory_gb=None, **kw):
-    from .models.multimodal.paligemma import PaliGemma
-    from .weights import HuggingFaceDownloader
+def _discover_and_register_builders():
+    """Scan model directories for builder.py files and register them."""
+    from .registry import register_model
 
-    vc = config.get("vision_config", {})
-    tc = config.get("text_config", {})
-    debug = kw.pop("debug", False)
+    models_root = Path(__file__).parent / "models"
 
-    model = PaliGemma(vision_cfg=vc, text_cfg=tc, dtype=dtype, model_type="gemma1")
-    _load_and_place(model, save_dir, dtype, device, max_memory_gb, debug=debug)
-    return model
-
-
-# ── MedGemma builder ───────────────────────────────────────────────
-def build_medgemma(save_dir, config, dtype, device, max_memory_gb=None, **kw):
-    from .models.multimodal.paligemma import PaliGemma
-
-    vc = config.get("vision_config", {})
-    tc = config.get("text_config", {})
-    debug = kw.pop("debug", False)
-
-    model = PaliGemma(vision_cfg=vc, text_cfg=tc, dtype=dtype, model_type="gemma3")
-    _load_and_place(model, save_dir, dtype, device, max_memory_gb, debug=debug)
-    return model
+    for modality_dir in models_root.iterdir():
+        if not modality_dir.is_dir() or modality_dir.name.startswith("_"):
+            continue
+        for builder_path in modality_dir.rglob("builder.py"):
+            _load_builder(builder_path, register_model)
 
 
-# ── Shared weight loading + device placement ────────────────────────
-def _load_and_place(model, save_dir, dtype, device, max_memory_gb, debug=False):
-    from .weights import HuggingFaceDownloader
+def _load_builder(builder_path: Path, register_fn):
+    """Load a builder.py module from a file path (supports hyphenated dirs)."""
+    parts = builder_path.relative_to(Path(__file__).parent).with_suffix("").parts
+    safe_parts = [p.replace("-", "_") for p in parts]
+    module_name = "thinklab." + ".".join(safe_parts)
 
-    model.load_weights(Path(save_dir), debug=debug)
-    model = model.to(dtype)
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, str(builder_path))
+        if spec is None or spec.loader is None:
+            logger.warning("Cannot load builder: %s", builder_path)
+            return
 
-    if device == "auto":
-        dev = model.smart_device()
-    else:
-        dev = torch.device(device)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
 
-    if dev.type == "cuda":
-        free = model.get_free_gpu_memory_mb()
-        needed = model.estimate_param_memory_mb()
-        budget = max_memory_gb * 1024 if max_memory_gb else free
+        pattern = getattr(module, "REGISTRY_PATTERN", None)
+        arch = getattr(module, "ARCH", None)
+        model_id = getattr(module, "MODEL_ID", None)
 
-        if budget < needed * 1.2:
-            logger.info("Offloading layers (%.0f MB free, %.0f MB needed)", free, needed)
-            model.vision_tower.to(dev)
-            model.multi_modal_projector.to(dev)
-            model.language_model.model.embed_tokens.to(dev)
-            model.language_model.model.norm.to(dev)
-            model.offload_layers_to_cpu(model.language_model.model.layers, keep_on_gpu=4)
-        else:
-            model.to(dev)
-    else:
-        model.to(dev)
+        if pattern is None:
+            logger.debug("Skipping %s (no REGISTRY_PATTERN)", builder_path)
+            return
 
-    model.eval()
-    return model
+        # Find the build function
+        build_fn = None
+        for name in dir(module):
+            if name.startswith("build_") and callable(getattr(module, name)):
+                build_fn = getattr(module, name)
+                break
+
+        if build_fn is None:
+            logger.warning("No build function found in %s", builder_path)
+            return
+
+        defaults = {
+            "_model_id": model_id,
+            "_builder_path": str(builder_path.parent),
+        }
+
+        register_fn(pattern, build_fn, arch=arch, defaults=defaults)
+        logger.info("✓ Registered: %s → %s (arch=%s)", pattern, model_id, arch)
+
+    except Exception as e:
+        logger.error("Failed to load builder %s: %s", builder_path, e)
 
 
-# ── Register all models on import ──────────────────────────────────
-from .registry import register_model
-
-register_model("paligemma", build_paligemma, arch="gemma1", defaults={})
-register_model("medgemma",  build_medgemma,  arch="gemma3", defaults={})
+# ── Run discovery on import ────────────────────────────────────────
+_discover_and_register_builders()

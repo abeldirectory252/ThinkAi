@@ -1,4 +1,4 @@
-# 🧠 ThinkLab
+# ThinkLab
 
 **Pure PyTorch multimodal AI research framework** with runtime explainability, production-grade inference, and agentic code execution.
 

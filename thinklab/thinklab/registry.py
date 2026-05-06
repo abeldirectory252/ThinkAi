@@ -138,6 +138,8 @@ def load_llm(
 
     builder_kwargs = {**entry["defaults"], **kwargs}
     builder_kwargs["debug"] = (logging_level == "DEBUG")
+    # Strip internal metadata keys (prefixed with _) before calling builder
+    builder_kwargs = {k: v for k, v in builder_kwargs.items() if not k.startswith("_")}
     raw_model = entry["builder"](
         save_dir=save_path,
         config=config,
@@ -203,22 +205,83 @@ class ThinkLabModel:
         self.isWebSocEnable = isWebSocEnable
         self.inference_config = inference_config
 
-        # Load tokenizer
-        from .models.multimodal.tokenizer import GemmaTokenizer
-        self.tokenizer = GemmaTokenizer(tokenizer_path)
-
-        # Image processor
-        from .models.multimodal.image_processor import ImageProcessor
+        # Vision config
         vis_cfg = config.get("vision_config", {})
-        img_size = vis_cfg.get("image_size", 224)
-        self.image_processor = ImageProcessor(image_size=img_size)
-        self.image_size = img_size
+        self.image_size = vis_cfg.get("image_size", 224)
         self.patch_size = vis_cfg.get("patch_size", 14)
+
+        # Load model-specific tokenizer and image processor
+        # Each model package (e.g. google/medgemma-4b-it/) has its own
+        self.tokenizer = self._load_tokenizer(model_name, arch, tokenizer_path)
+        self.image_processor = self._load_image_processor(model_name, arch, self.image_size)
 
         logger.info(
             "✓ ThinkLabModel ready | %s | arch=%s | json=%s",
             model_name, arch, isJsonAsOutput,
         )
+
+    # ── Model-specific component loaders ────────────────────────────
+    @staticmethod
+    def _load_tokenizer(model_name: str, arch: str, tokenizer_path: str):
+        """Load tokenizer from the model's own package, fallback to legacy."""
+        import importlib.util, sys
+        from pathlib import Path
+
+        parts = model_name.split("/")
+        if len(parts) == 2:
+            models_root = Path(__file__).parent / "models" / "multimodal"
+            tok_file = models_root / parts[0] / parts[1] / "tokenizer.py"
+
+            if tok_file.exists():
+                safe_name = f"thinklab.models.multimodal.{parts[0]}.{parts[1].replace('-', '_')}.tokenizer"
+                try:
+                    spec = importlib.util.spec_from_file_location(safe_name, str(tok_file))
+                    mod = importlib.util.module_from_spec(spec)
+                    sys.modules[safe_name] = mod
+                    spec.loader.exec_module(mod)
+                    for attr_name in dir(mod):
+                        attr = getattr(mod, attr_name)
+                        if isinstance(attr, type) and "Tokenizer" in attr_name:
+                            logger.info("Using model-specific tokenizer: %s", attr_name)
+                            return attr(tokenizer_path)
+                except Exception as e:
+                    logger.warning("Failed to load model tokenizer: %s", e)
+
+        # Fallback to legacy shared tokenizer
+        logger.info("Using legacy shared tokenizer")
+        from .models.multimodal.tokenizer import GemmaTokenizer
+        return GemmaTokenizer(tokenizer_path)
+
+    @staticmethod
+    def _load_image_processor(model_name: str, arch: str, image_size: int):
+        """Load image processor from the model's own package, fallback to legacy."""
+        import importlib.util, sys
+        from pathlib import Path
+
+        parts = model_name.split("/")
+        if len(parts) == 2:
+            models_root = Path(__file__).parent / "models" / "multimodal"
+            proc_file = models_root / parts[0] / parts[1] / "image_processor.py"
+
+            if proc_file.exists():
+                safe_name = f"thinklab.models.multimodal.{parts[0]}.{parts[1].replace('-', '_')}.image_processor"
+                try:
+                    spec = importlib.util.spec_from_file_location(safe_name, str(proc_file))
+                    mod = importlib.util.module_from_spec(spec)
+                    sys.modules[safe_name] = mod
+                    spec.loader.exec_module(mod)
+                    for attr_name in dir(mod):
+                        attr = getattr(mod, attr_name)
+                        if isinstance(attr, type) and "Processor" in attr_name:
+                            logger.info("Using model-specific image processor: %s", attr_name)
+                            return attr(image_size=image_size)
+                except Exception as e:
+                    logger.warning("Failed to load model processor: %s", e)
+
+        # Fallback to legacy shared processor
+        logger.info("Using legacy shared image processor")
+        from .models.multimodal.image_processor import ImageProcessor
+        return ImageProcessor(image_size=image_size)
 
     # ── Inference (with optional explainability) ────────────────────
     def inference(self, image=None, prompt: str = "",
