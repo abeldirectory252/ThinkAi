@@ -1,30 +1,41 @@
-# PaliGemma 3B (`google/paligemma-3b-mix-224`)
 
-| Property | Value |
-|---|---|
-| **Parameters** | ~3B |
-| **Architecture** | SigLIP ViT + Gemma 1 Decoder |
-| **Image Size** | 224 × 224 |
-| **Decoder Layers** | 18, no QK-norm |
-| **Vocab Size** | 257216 |
+```markdown
+# 🌟 PaliGemma 3B (`google/paligemma-3b-mix-224`)
+> A compact, high-performance vision-language model combining SigLIP vision encoding with the Gemma 1 decoder architecture.
 
+![Parameters](https://img.shields.io/badge/Parameters-~3B-4A90E2)
+![Image Size](https://img.shields.io/badge/Image%20Size-224×224-F5A623)
+![Decoder Layers](https://img.shields.io/badge/Decoder%20Layers-18-50C878)
+![License](https://img.shields.io/badge/License-Apache%202.0-2ECC71)
 
-======================================================================
-🔍 TOKEN BY TOKEN BREAKDOWN (Total tokens: 65541)
-======================================================================
-Token    0 | ID:  257152 | String: '<image>'
+## 📊 Model Specifications
+| Property          | Value                          |
+|-------------------|--------------------------------|
+| **Parameters**    | ~3B                            |
+| **Architecture**  | SigLIP ViT + Gemma 1 Decoder   |
+| **Image Size**    | 224 × 224                      |
+| **Decoder Layers**| 18 (no QK-norm)                |
+| **Vocab Size**    | 257,216                        |
+
+## 🔍 Token Sequence Breakdown
+**Total Tokens:** `65,541`
+
+```text
+Token 0     | ID: 257152 | String: '<image>'
       ... [ Skipped 65534 identical '<image>' tokens ] ...
-Token 65535 | ID:  257152 | String: '<image>'
-Token 65536 | ID:       2 | String: '<bos>'
-Token 65537 | ID:   50721 | String: 'Describe'
-Token 65538 | ID:     736 | String: '▁this'
-Token 65539 | ID:    2416 | String: '▁image'
-Token 65540 | ID:     108 | String: '\n'
-======================================================================
+Token 65535 | ID: 257152 | String: '<image>'
+Token 65536 | ID:      2 | String: '<bos>'
+Token 65537 | ID:  50721 | String: 'Describe'
+Token 65538 | ID:    736 | String: '▁this'
+Token 65539 | ID:   2416 | String: '▁image'
+Token 65540 | ID:    108 | String: '\n'
+```
 
-==================================================================================================
-🌳 COMPLETE MODEL TREE (WITH VECTOR SIZES & INFORMATION FLOW)
-=================================================================================================
+## 🌳 Architecture & Information Flow
+<details open>
+<summary>📂 Click to expand full model tree</summary>
+
+```text
 PaliGemmaModel: PaliGemmaForConditionalGeneration (2,923,466,480 params)
      ↳ Flow: In: None ➔ Out: {loss: [], logits: [1, 517, 257216], image_hidd...
   ├─ model: PaliGemmaModel (2,923,466,480 params)
@@ -90,3 +101,46 @@ PaliGemmaModel: PaliGemmaForConditionalGeneration (2,923,466,480 params)
     └─      ↳ Flow: In: [1, 517, 2048] ➔ Out: ([1, 517, 256], [1, 517, 256])
 └─ lm_head: Linear (526,778,368 params) | W: [257216, 2048]
 └─      ↳ Flow: In: [1, 517, 2048] ➔ Out: [1, 517, 257216]
+```
+</details>
+
+## 🛠️ Repository Usage
+### 📦 Installation
+```bash
+pip install transformers torch accelerate
+```
+
+### 💻 Inference Example
+```python
+from transformers import PaliGemmaProcessor, PaliGemmaForConditionalGeneration
+from PIL import Image
+
+model_name = "google/paligemma-3b-mix-224"
+processor = PaliGemmaProcessor.from_pretrained(model_name)
+model = PaliGemmaForConditionalGeneration.from_pretrained(model_name)
+
+# Load & preprocess
+image = Image.open("sample.jpg").convert("RGB")
+prompt = "Describe this image"
+inputs = processor(text=prompt, images=image, return_tensors="pt")
+
+# Generate
+with torch.no_grad():
+    output = model.generate(**inputs, max_new_tokens=100)
+    
+print(processor.decode(output[0], skip_special_tokens=True))
+```
+
+## 📜 Citation & License
+- **Original Model**: [Google PaliGemma](https://ai.google.dev/gemma)
+- **License**: [Gemma Terms of Use](https://ai.google.dev/gemma/terms)
+- **Citation**:
+  ```bibtex
+  @misc{google2024paligemma,
+    title={PaliGemma: A Versatile Vision-Language Model},
+    author={Google DeepMind},
+    year={2024},
+    url={https://ai.google.dev/gemma}
+  }
+  ```
+
