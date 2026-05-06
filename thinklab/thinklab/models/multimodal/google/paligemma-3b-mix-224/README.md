@@ -1,23 +1,35 @@
-```markdown
+````markdown id="p0v9k8"
 # 🌟 PaliGemma 3B (`google/paligemma-3b-mix-224`)
-> A compact, high-performance vision-language model combining SigLIP vision encoding with the Gemma 1 decoder architecture.
+
+> A compact, high-performance vision-language model combining **SigLIP vision encoding** with the **Gemma 1 decoder architecture**.
+
+---
 
 ![Parameters](https://img.shields.io/badge/Parameters-~3B-4A90E2)
 ![Image Size](https://img.shields.io/badge/Image%20Size-224×224-F5A623)
 ![Decoder Layers](https://img.shields.io/badge/Decoder%20Layers-18%20(Gemma%201)-50C878)
 ![License](https://img.shields.io/badge/License-Apache%202.0-2ECC71)
 
+---
+
 ## 📊 Model Specifications
-| Property          | Value                          |
-|-------------------|--------------------------------|
-| **Parameters**    | ~3B                            |
-| **Architecture**  | SigLIP ViT + Gemma 1 Decoder   |
-| **Image Size**    | 224 × 224                      |
-| **Decoder Layers**| 18 (no QK-norm)                |
-| **Vocab Size**    | 257,216                        |
+
+| Property           | Value                        |
+|--------------------|------------------------------|
+| **Parameters**     | ~3B                          |
+| **Architecture**   | SigLIP ViT + Gemma 1 Decoder |
+| **Image Size**     | 224 × 224                    |
+| **Decoder Layers** | 18 (no QK-norm)              |
+| **Vocab Size**     | 257,216                      |
+
+---
 
 ## 🔍 Token Sequence Breakdown
+
 **Total Tokens:** `65,541`
+
+<details>
+<summary>View Token Details</summary>
 
 ```text
 Token 0     | ID: 257152 | String: '<image>'
@@ -28,9 +40,17 @@ Token 65537 | ID:  50721 | String: 'Describe'
 Token 65538 | ID:    736 | String: '▁this'
 Token 65539 | ID:   2416 | String: '▁image'
 Token 65540 | ID:    108 | String: '\n'
-```
+````
+
+</details>
+
+---
 
 ## 🌳 Architecture & Information Flow
+
+<details>
+<summary>Expand Full Architecture</summary>
+
 ```text
 PaliGemmaModel: PaliGemmaForConditionalGeneration (2,923,466,480 params)
   ↳ Flow: In: None ➔ Out: {loss: [], logits: [1, 517, 257216], image_hidd...}
@@ -99,25 +119,37 @@ PaliGemmaModel: PaliGemmaForConditionalGeneration (2,923,466,480 params)
    ↳ Flow: In: [1, 517, 2048] ➔ Out: [1, 517, 257216]
 ```
 
+</details>
+
+---
+
 ## ⚙️ Key Configuration Values
-| Key | Value |
-|---|---|
-| `model_type` | `paligemma` |
-| `image_token_index` | `257152` |
-| `hidden_size` / `head_dim` | `2048` / `256` |
-| `num_attention_heads` / `num_kv_heads` | `8` / `1` |
-| `vision_hidden_size` / `image_size` | `1152` / `224` |
-| `vision_patch_size` / `vision_layers` | `14` / `27` |
-| `projector_hidden_dim` | `2048` |
+
+| Key                                    | Value          |
+| -------------------------------------- | -------------- |
+| `model_type`                           | `paligemma`    |
+| `image_token_index`                    | `257152`       |
+| `hidden_size` / `head_dim`             | `2048` / `256` |
+| `num_attention_heads` / `num_kv_heads` | `8` / `1`      |
+| `vision_hidden_size` / `image_size`    | `1152` / `224` |
+| `vision_patch_size` / `vision_layers`  | `14` / `27`    |
+| `projector_hidden_dim`                 | `2048`         |
+
+---
 
 ## 🛠️ Repository Usage
+
 ### 📦 Installation
-```bash
+
+```bash id="n71x7q"
 pip install transformers torch accelerate
 ```
 
+---
+
 ### 💻 Inference Example
-```python
+
+```python id="j7v9r2"
 from transformers import PaliGemmaProcessor, PaliGemmaForConditionalGeneration
 from PIL import Image
 import torch
@@ -136,20 +168,25 @@ inputs = processor(text=prompt, images=image, return_tensors="pt").to(model.devi
 # Generate
 with torch.no_grad():
     output = model.generate(**inputs, max_new_tokens=100)
-    
+
 print(processor.decode(output[0], skip_special_tokens=True))
 ```
 
+---
+
 ## 📜 Citation & License
-- **Original Model**: [Google PaliGemma](https://ai.google.dev/gemma)
-- **License**: [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0)
-- **Citation**:
-  ```bibtex
-  @misc{beyer2024paligemma,
-    title={PaliGemma: A versatile 3B VLM for transfer},
-    author={Lucas Beyer and Andreas Steiner and André Susano Pinto and others},
-    year={2024},
-    url={https://arxiv.org/abs/2407.07726}
-  }
-  ```
+
+* **Original Model**: [https://ai.google.dev/gemma](https://ai.google.dev/gemma)
+* **License**: Apache 2.0
+
+```bibtex id="s8r4pq"
+@misc{beyer2024paligemma,
+  title={PaliGemma: A versatile 3B VLM for transfer},
+  author={Lucas Beyer and Andreas Steiner and André Susano Pinto and others},
+  year={2024},
+  url={https://arxiv.org/abs/2407.07726}
+}
+```
+
+```
 
