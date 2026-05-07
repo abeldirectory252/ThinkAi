@@ -224,7 +224,7 @@ class ThinkLabModel:
     @staticmethod
     def _load_tokenizer(model_name: str, arch: str, tokenizer_path: str):
         """Load tokenizer from the model's own package, fallback to legacy."""
-        import importlib.util, sys
+        import importlib.util, sys, types
         from pathlib import Path
 
         parts = model_name.split("/")
@@ -234,9 +234,17 @@ class ThinkLabModel:
 
             if tok_file.exists():
                 safe_name = f"thinklab.models.multimodal.{parts[0]}.{parts[1].replace('-', '_')}.tokenizer"
+                # Ensure parent package is registered (builder may have done this already)
+                pkg_name = ".".join(safe_name.split(".")[:-1])
+                if pkg_name not in sys.modules:
+                    pkg = types.ModuleType(pkg_name)
+                    pkg.__path__ = [str(tok_file.parent)]
+                    pkg.__package__ = pkg_name
+                    sys.modules[pkg_name] = pkg
                 try:
                     spec = importlib.util.spec_from_file_location(safe_name, str(tok_file))
                     mod = importlib.util.module_from_spec(spec)
+                    mod.__package__ = pkg_name
                     sys.modules[safe_name] = mod
                     spec.loader.exec_module(mod)
                     for attr_name in dir(mod):
@@ -255,7 +263,7 @@ class ThinkLabModel:
     @staticmethod
     def _load_image_processor(model_name: str, arch: str, image_size: int):
         """Load image processor from the model's own package, fallback to legacy."""
-        import importlib.util, sys
+        import importlib.util, sys, types
         from pathlib import Path
 
         parts = model_name.split("/")
@@ -265,9 +273,16 @@ class ThinkLabModel:
 
             if proc_file.exists():
                 safe_name = f"thinklab.models.multimodal.{parts[0]}.{parts[1].replace('-', '_')}.image_processor"
+                pkg_name = ".".join(safe_name.split(".")[:-1])
+                if pkg_name not in sys.modules:
+                    pkg = types.ModuleType(pkg_name)
+                    pkg.__path__ = [str(proc_file.parent)]
+                    pkg.__package__ = pkg_name
+                    sys.modules[pkg_name] = pkg
                 try:
                     spec = importlib.util.spec_from_file_location(safe_name, str(proc_file))
                     mod = importlib.util.module_from_spec(spec)
+                    mod.__package__ = pkg_name
                     sys.modules[safe_name] = mod
                     spec.loader.exec_module(mod)
                     for attr_name in dir(mod):
