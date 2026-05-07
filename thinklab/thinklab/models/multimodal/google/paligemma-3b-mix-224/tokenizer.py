@@ -5,6 +5,7 @@ import sentencepiece as spm
 
 
 class PaliGemmaTokenizer:
+    HAS_CHAT_TEMPLATE = False
     BOS_ID, EOS_ID, PAD_ID = 2, 1, 0
     IMAGE_TOKEN_ID = 257152
 

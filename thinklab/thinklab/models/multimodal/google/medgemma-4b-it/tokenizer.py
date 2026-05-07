@@ -10,6 +10,8 @@ import sentencepiece as spm
 class MedGemmaTokenizer:
     """Gemma 3 / MedGemma tokenizer with chat template support."""
 
+    HAS_CHAT_TEMPLATE = True
+
     BOS_ID = 2
     EOS_ID = 1
     PAD_ID = 0

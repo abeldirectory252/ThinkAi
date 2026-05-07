@@ -344,6 +344,14 @@ class ThinkLabModel:
         """
         # ── Parse messages if provided ───────────────────────────────
         if messages:
+            # Validate: only models with chat templates support messages API
+            has_template = getattr(self.tokenizer, 'HAS_CHAT_TEMPLATE', False)
+            if not has_template:
+                raise ValueError(
+                    f"Cannot use messages= API because '{self.model_name}' does not have a chat template.\n"
+                    f"Use the simple API instead:\n"
+                    f"  model.inference(prompt='...', image_path='...')"
+                )
             for msg in messages:
                 role = msg.get("role", "")
                 content = msg.get("content", [])

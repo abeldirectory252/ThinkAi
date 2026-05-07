@@ -11,6 +11,8 @@ import sentencepiece as spm
 class GemmaTokenizer:
     """Load tokenizer.model from the downloaded PaliGemma weights."""
 
+    HAS_CHAT_TEMPLATE = True  # Legacy tokenizer supports both formats
+
     BOS_ID = 2      # <bos>
     EOS_ID = 1      # <eos>
     PAD_ID = 0      # <pad>
