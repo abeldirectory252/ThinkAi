@@ -10,8 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ....core.base_model import BaseModel
-from ....weights.huggingface import HuggingFaceDownloader
+from .....core.base_model import BaseModel
+from .....weights.huggingface import HuggingFaceDownloader
 from .vision_encoder import VisionTower
 from .decoder import Gemma3ForCausalLM
 from .projector import MultiModalProjector
