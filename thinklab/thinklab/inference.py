@@ -26,6 +26,7 @@ from .schema import (
 logger = logging.getLogger("thinklab.inference")
 
 CLINICAL_MODELS = {"medgemma", "med-palm", "biomedclip", "radlm"}
+SEGMENTATION_MODELS = {"sam3"}
 
 
 class InferenceEngine:
@@ -43,6 +44,10 @@ class InferenceEngine:
     def _is_clinical_model(self) -> bool:
         name = self.tm.model_name.lower()
         return any(c in name for c in CLINICAL_MODELS)
+
+    def _is_segmentation_model(self) -> bool:
+        name = self.tm.model_name.lower()
+        return any(s in name for s in SEGMENTATION_MODELS)
 
     # ── Image preprocessing ─────────────────────────────────────────
     def _preprocess_image(self, image, img_cfg: Optional[ImageConfig] = None):
@@ -229,6 +234,85 @@ class InferenceEngine:
         return mask, segments, weights, pos_overlay, neg_overlay
 
     # ═════════════════════════════════════════════════════════════════
+    #  SAM3 / Segmentation — dedicated inference path
+    # ═════════════════════════════════════════════════════════════════
+    def _run_segmentation(self, image, prompt, payload=None, **kwargs):
+        """Run SAM3 segmentation inference.
+
+        Returns InferenceResult with:
+            .raw_outputs  — dict with pred_masks, pred_boxes, pred_logits, etc.
+            .inputs       — preprocessed inputs dict (pixel_values, original_sizes)
+            .post_process_instance_segmentation()  — convenience method
+        """
+        t0 = time.perf_counter()
+
+        pl = InferencePayload.from_dict(payload) if payload else InferencePayload()
+        actual_prompt = pl.prompt or prompt
+        actual_image = pl.image_path or image
+
+        # ── Preprocess image ─────────────────────────────────────────
+        if isinstance(actual_image, str):
+            import os
+            if not os.path.exists(actual_image):
+                raise FileNotFoundError(
+                    f"\n{'='*60}\n"
+                    f"  ❌ IMAGE PATH ERROR\n"
+                    f"{'='*60}\n"
+                    f"  The image path you provided does not exist:\n\n"
+                    f"    → \"{actual_image}\"\n\n"
+                    f"{'='*60}"
+                )
+
+        inputs = self.processor(actual_image, dtype=self.tm.dtype)
+        dev = next(self.model.parameters()).device
+        pixel_values = inputs["pixel_values"].to(dev)
+        original_sizes = inputs["original_sizes"]
+
+        # ── Tokenize text prompt ─────────────────────────────────────
+        input_ids = self.tokenizer.encode(actual_prompt)
+        input_ids_t = torch.tensor([input_ids], device=dev)
+        attn_mask = torch.tensor(
+            [self.tokenizer.get_attention_mask(input_ids)], device=dev
+        )
+
+        # ── Forward pass ─────────────────────────────────────────────
+        with torch.no_grad():
+            outputs = self.model(
+                pixel_values=pixel_values,
+                input_ids=input_ids_t,
+                attention_mask=attn_mask,
+            )
+
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+
+        # Count detections at default threshold
+        scores = outputs["pred_logits"].sigmoid()
+        if outputs.get("presence_logits") is not None:
+            scores = scores * outputs["presence_logits"].sigmoid()
+        n_detections = (scores > 0.3).sum().item()
+
+        result = InferenceResult(
+            request_id=InferenceResult.generate_request_id(self.tm.model_name),
+            model=self.tm.model_name,
+            version=self.tm.arch,
+            inference_mode="segmentation",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            processing_latency_ms=round(elapsed_ms, 1),
+            token_speed="N/A",
+            tokens_generated=0,
+            model_output=f"Segmentation complete: {n_detections} detections for '{actual_prompt}'",
+            trace_id=self.config.trace_id or kwargs.get("trace_id"),
+            metadata=pl.metadata,
+        )
+
+        # Attach raw outputs and inputs for post-processing
+        result.raw_outputs = outputs
+        result.inputs = inputs
+        result._image_processor = self.processor
+
+        return result
+
+    # ═════════════════════════════════════════════════════════════════
     #  MAIN RUN — single entry point for inference + optional explain
     # ═════════════════════════════════════════════════════════════════
     def run(self, image, prompt, max_tokens=200,
@@ -240,9 +324,18 @@ class InferenceEngine:
 
             engine.run(img, prompt, explainability={"enabled": True, "mode": "grad_cam"})
 
+        For segmentation models (SAM3), returns InferenceResult with raw_outputs
+        and post_process_instance_segmentation() method.
+
         Returns:
             InferenceResult with .model_output and .explain (contains images)
         """
+        # ── Segmentation models take a different path ────────────────
+        if self._is_segmentation_model():
+            return self._run_segmentation(
+                image, prompt, payload=payload, **kwargs
+            )
+
         t0 = time.perf_counter()
 
         # Parse payload

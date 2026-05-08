@@ -257,6 +257,44 @@ class InferenceResult:
     trace_id: Optional[str] = None
     metadata: Optional[dict] = None
 
+    def __post_init__(self):
+        # Segmentation-specific fields (set dynamically by inference engine)
+        self.raw_outputs: Optional[dict] = None       # pred_masks, pred_boxes, pred_logits, etc.
+        self.inputs: Optional[dict] = None             # pixel_values, original_sizes
+        self._image_processor = None                    # Sam3ImageProcessor reference
+
+    def post_process_instance_segmentation(
+        self,
+        outputs=None,
+        threshold: float = 0.3,
+        mask_threshold: float = 0.5,
+        target_sizes: Optional[List[tuple]] = None,
+    ) -> list:
+        """Post-process segmentation outputs into instance masks, boxes, and scores.
+
+        Args:
+            outputs: Raw model outputs dict. If None, uses self.raw_outputs.
+            threshold: Score threshold to keep instances.
+            mask_threshold: Threshold for binarizing predicted masks.
+            target_sizes: List of (height, width) tuples for resizing.
+
+        Returns:
+            list[dict]: Each dict has 'scores', 'boxes', 'masks' tensors.
+        """
+        if self._image_processor is None:
+            raise RuntimeError(
+                "post_process_instance_segmentation is only available for "
+                "segmentation models (e.g. facebook/sam3). "
+                "This result was produced by a text-generation model."
+            )
+        if outputs is None:
+            outputs = self.raw_outputs
+        if outputs is None:
+            raise ValueError("No outputs to post-process.")
+        return self._image_processor.post_process_instance_segmentation(
+            outputs, threshold, mask_threshold, target_sizes
+        )
+
     def to_dict(self) -> dict:
         d = {}
         for k, v in asdict(self).items():
