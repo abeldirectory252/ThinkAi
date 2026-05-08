@@ -226,6 +226,14 @@ class Sam3DetrDecoder(nn.Module):
         presence = self.presence_token.weight.unsqueeze(0).expand(B, -1, -1)
         hidden_states = torch.cat([presence, queries], dim=1)
 
+        # Build 4D text cross-attention mask: [B, 1, 1, text_len]
+        text_cross_attn_mask = None
+        if text_mask is not None:
+            text_cross_attn_mask = torch.zeros(
+                text_mask.shape[0], 1, 1, text_mask.shape[1],
+                device=hidden_states.device, dtype=hidden_states.dtype)
+            text_cross_attn_mask.masked_fill_(~text_mask.unsqueeze(1).unsqueeze(2), float("-inf"))
+
         intermediates = []
         intermediate_boxes = [ref_boxes]
         intermediate_presence = []
@@ -242,6 +250,7 @@ class Sam3DetrDecoder(nn.Module):
 
             hidden_states = layer(hidden_states, query_pos, text_features,
                                    vision_features, vision_pos_encoding,
+                                   text_cross_attn_mask=text_cross_attn_mask,
                                    vision_cross_attn_mask=vision_cross_attn_mask)
 
             query_hs = hidden_states[:, 1:]
@@ -386,7 +395,16 @@ class Sam3MaskDecoder(nn.Module):
         if prompt_features is not None:
             residual = encoder_hidden_states
             normed = self.prompt_cross_attn_norm(encoder_hidden_states)
-            out, _ = self.prompt_cross_attn(normed, prompt_features, prompt_features)
+
+            cross_attn_mask = None
+            if prompt_mask is not None:
+                cross_attn_mask = torch.zeros(
+                    prompt_mask.shape[0], 1, 1, prompt_mask.shape[1],
+                    device=normed.device, dtype=normed.dtype)
+                cross_attn_mask.masked_fill_(~prompt_mask.unsqueeze(1).unsqueeze(2), float("-inf"))
+
+            out, _ = self.prompt_cross_attn(normed, prompt_features, prompt_features,
+                                             attention_mask=cross_attn_mask)
             encoder_hidden_states = residual + self.prompt_cross_attn_dropout(out)
 
         # 2) Replace coarsest backbone feature with (updated) encoder vision features
