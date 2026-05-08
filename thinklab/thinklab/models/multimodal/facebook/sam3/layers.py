@@ -77,7 +77,7 @@ class Sam3Attention(nn.Module):
         attn_w = (q @ k.transpose(-2, -1)) * self.scale
         if attention_mask is not None:
             attn_w = attn_w + attention_mask
-        attn_w = F.softmax(attn_w, dim=-1)
+        attn_w = F.softmax(attn_w, dim=-1).to(v.dtype)
         out = (attn_w @ v).transpose(1, 2).reshape(B, N, -1)
         return self.o_proj(out), attn_w
 

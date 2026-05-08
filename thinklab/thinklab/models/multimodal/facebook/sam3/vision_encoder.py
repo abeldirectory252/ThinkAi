@@ -84,7 +84,7 @@ class Sam3ViTRoPEAttention(nn.Module):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb_2d(q, k, cos, sin)
         attn_w = (q @ k.transpose(-2, -1)) * self.scale
-        attn_w = F.softmax(attn_w, dim=-1)
+        attn_w = F.softmax(attn_w, dim=-1).to(v.dtype)
         out = (attn_w @ v).transpose(1, 2).reshape(B, H, W, -1).contiguous()
         return self.o_proj(out), attn_w
 
