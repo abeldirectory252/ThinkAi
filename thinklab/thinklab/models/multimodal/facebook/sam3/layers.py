@@ -96,17 +96,22 @@ class Sam3SinePositionEmbedding(nn.Module):
         self.scale = scale
 
     def encode_boxes(self, boxes):
-        """Encode 4D box coords [B, Q, 4] → [B, Q, num_pos_feats*4]."""
+        """Encode 4D box coords [B, Q, 4] → [B, Q, num_pos_feats*4].
+        HF order: (pos_y, pos_x, pos_w, pos_h)."""
         input_dtype = boxes.dtype
         dim_t = torch.arange(self.num_pos_feats, dtype=torch.int64, device=boxes.device).float()
         dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
-        embeds = []
-        for i in range(4):
-            coord = boxes[:, :, i].float() * self.scale
-            pos = coord[:, :, None] / dim_t
-            pos = torch.stack((pos[:, :, 0::2].sin(), pos[:, :, 1::2].cos()), dim=3).flatten(2)
-            embeds.append(pos)
-        return torch.cat(embeds, dim=2).to(input_dtype)
+
+        def _encode_coord(c):
+            c = c.float() * self.scale
+            p = c[:, :, None] / dim_t
+            return torch.stack((p[:, :, 0::2].sin(), p[:, :, 1::2].cos()), dim=3).flatten(2)
+
+        pos_x = _encode_coord(boxes[:, :, 0])
+        pos_y = _encode_coord(boxes[:, :, 1])
+        pos_w = _encode_coord(boxes[:, :, 2])
+        pos_h = _encode_coord(boxes[:, :, 3])
+        return torch.cat((pos_y, pos_x, pos_w, pos_h), dim=2).to(input_dtype)
 
     def encode_1d_positions(self, x, y):
         input_dtype = x.dtype

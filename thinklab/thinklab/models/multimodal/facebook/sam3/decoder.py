@@ -87,8 +87,19 @@ class Sam3DetrEncoder(nn.Module):
             pos = vision_pos_embeds
             spatial = spatial_shapes
 
+        # Build 4D cross-attention mask: [B, 1, 1, text_len]
+        # -inf for padding positions so they are ignored
+        cross_attn_mask = None
+        if text_mask is not None:
+            # text_mask: [B, seq_len] True=valid, False=padding
+            cross_attn_mask = torch.zeros(
+                text_mask.shape[0], 1, 1, text_mask.shape[1],
+                device=hidden.device, dtype=hidden.dtype)
+            cross_attn_mask.masked_fill_(~text_mask.unsqueeze(1).unsqueeze(2), float("-inf"))
+
         for layer in self.layers:
-            hidden = layer(hidden, text_features, pos)
+            hidden = layer(hidden, text_features, pos,
+                           prompt_cross_attn_mask=cross_attn_mask)
 
         return {
             "last_hidden_state": hidden,
@@ -371,7 +382,14 @@ class Sam3MaskDecoder(nn.Module):
 
     def forward(self, decoder_queries, backbone_features, encoder_hidden_states,
                 prompt_features=None, prompt_mask=None):
-        # Replace finest backbone feature with encoder vision features
+        # 1) Cross-attention: encoder features attend to prompt features FIRST
+        if prompt_features is not None:
+            residual = encoder_hidden_states
+            normed = self.prompt_cross_attn_norm(encoder_hidden_states)
+            out, _ = self.prompt_cross_attn(normed, prompt_features, prompt_features)
+            encoder_hidden_states = residual + self.prompt_cross_attn_dropout(out)
+
+        # 2) Replace coarsest backbone feature with (updated) encoder vision features
         feats = [f.clone() for f in backbone_features]
         spatial_dim = feats[-1].shape[-2] * feats[-1].shape[-1]
         enc_vis = encoder_hidden_states[:, :spatial_dim, :]
@@ -379,12 +397,7 @@ class Sam3MaskDecoder(nn.Module):
         H, W = feats[-1].shape[-2:]
         feats[-1] = enc_vis.transpose(1, 2).reshape(B, C, H, W)
 
-        if prompt_features is not None:
-            residual = encoder_hidden_states
-            normed = self.prompt_cross_attn_norm(encoder_hidden_states)
-            out, _ = self.prompt_cross_attn(normed, prompt_features, prompt_features)
-            encoder_hidden_states = residual + self.prompt_cross_attn_dropout(out)
-
+        # 3) FPN pixel decoder + mask prediction
         pixel_embed = self.pixel_decoder(feats)
         instance_embed = self.instance_projection(pixel_embed)
         mask_embed = self.mask_embedder(decoder_queries)
