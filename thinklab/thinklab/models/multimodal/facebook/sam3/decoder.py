@@ -1,7 +1,8 @@
 """
-SAM3 Decoder: DETR Encoder, DETR Decoder, Geometry Encoder, Mask Decoder.
-These form the detection + segmentation head of SAM3.
+SAM3 Decoder — DETR Encoder/Decoder, Geometry Encoder, Mask Decoder, Scoring.
+All key names match HuggingFace exactly.
 """
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,351 +10,417 @@ import torch.nn.functional as F
 from .layers import Sam3Attention, Sam3MLP, Sam3DecoderMLP, Sam3SinePositionEmbedding, Sam3MaskEmbedder
 
 
+def inverse_sigmoid(x, eps=1e-3):
+    x = x.clamp(min=0, max=1)
+    x1 = x.clamp(min=eps)
+    x2 = (1 - x).clamp(min=eps)
+    return torch.log(x1 / x2)
+
+
+def box_cxcywh_to_xyxy(x):
+    xc, yc, w, h = x.unbind(-1)
+    return torch.stack([(xc - 0.5*w), (yc - 0.5*h), (xc + 0.5*w), (yc + 0.5*h)], dim=-1)
+
+
 # ── DETR Encoder ────────────────────────────────────────────────
 class Sam3DetrEncoderLayer(nn.Module):
-    """DETR encoder layer: self_attn + cross_attn + MLP."""
-    def __init__(self, hidden: int = 256, num_heads: int = 8,
-                 intermediate: int = 2048, dropout: float = 0.0):
+    """Keys: layer_norm1, self_attn, dropout, cross_attn, layer_norm2, mlp, layer_norm3."""
+    def __init__(self, hidden=256, num_heads=8, intermediate=2048, drop=0.0):
         super().__init__()
         self.layer_norm1 = nn.LayerNorm(hidden)
         self.self_attn = Sam3Attention(hidden, num_heads)
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(drop)
         self.cross_attn = Sam3Attention(hidden, num_heads)
         self.layer_norm2 = nn.LayerNorm(hidden)
-        self.mlp = Sam3MLP(hidden, intermediate)
+        self.mlp = Sam3MLP(hidden, intermediate, drop)
         self.layer_norm3 = nn.LayerNorm(hidden)
 
-    def forward(self, x, pos_embed=None, attn_mask=None):
-        # Self-attention with positional encoding
-        q = k = self.layer_norm1(x)
-        if pos_embed is not None:
-            q = q + pos_embed
-            k = k + pos_embed
-        attn_out = self.self_attn(q, k, self.layer_norm1(x))[0]
-        x = x + self.dropout(attn_out)
+    def forward(self, vision_feats, prompt_feats, vision_pos,
+                prompt_cross_attn_mask=None):
+        # Self-attention with position encoding
+        residual = vision_feats
+        h = self.layer_norm1(vision_feats)
+        h_pos = h + vision_pos
+        h, _ = self.self_attn(h_pos, h_pos, h)
+        h = self.dropout(h) + residual
+        # Cross-attention to text/prompt
+        residual = h
+        h = self.layer_norm2(h)
+        h, _ = self.cross_attn(h, prompt_feats, prompt_feats,
+                                attention_mask=prompt_cross_attn_mask)
+        h = self.dropout(h) + residual
         # MLP
-        residual = x
-        x = self.layer_norm2(x)
-        x = residual + self.mlp(x)
-        x = self.layer_norm3(x)
-        return x
+        residual = h
+        h = self.layer_norm3(h)
+        h = self.mlp(h)
+        h = self.dropout(h) + residual
+        return h
 
 
 class Sam3DetrEncoder(nn.Module):
-    """6-layer DETR encoder processing vision features."""
-    def __init__(self, hidden: int = 256, num_heads: int = 8,
-                 intermediate: int = 2048, num_layers: int = 6):
+    """Keys: layers."""
+    def __init__(self, hidden=256, num_heads=8, intermediate=2048,
+                 num_layers=6, drop=0.0):
         super().__init__()
         self.layers = nn.ModuleList([
-            Sam3DetrEncoderLayer(hidden, num_heads, intermediate)
+            Sam3DetrEncoderLayer(hidden, num_heads, intermediate, drop)
             for _ in range(num_layers)
         ])
 
-    def forward(self, vision_features, pos_embeds=None):
-        x = vision_features
+    def forward(self, vision_features, text_features, vision_pos_embeds,
+                text_mask=None, spatial_shapes=None):
+        """Process multi-level or single-level vision features."""
+        # If lists, flatten and concatenate
+        if isinstance(vision_features, (list, tuple)):
+            shapes = []
+            feats_flat, pos_flat = [], []
+            for f, p in zip(vision_features, vision_pos_embeds):
+                H, W = f.shape[-2:]
+                shapes.append((H, W))
+                feats_flat.append(f.flatten(2).transpose(1, 2))
+                pos_flat.append(p.flatten(2).transpose(1, 2))
+            hidden = torch.cat(feats_flat, dim=1)
+            pos = torch.cat(pos_flat, dim=1)
+            spatial = torch.tensor(shapes, dtype=torch.long, device=hidden.device)
+        else:
+            hidden = vision_features
+            pos = vision_pos_embeds
+            spatial = spatial_shapes
+
         for layer in self.layers:
-            x = layer(x, pos_embeds)
-        return {"last_hidden_state": x, "pos_embeds_flattened": pos_embeds}
+            hidden = layer(hidden, text_features, pos)
+
+        return {
+            "last_hidden_state": hidden,
+            "pos_embeds_flattened": pos,
+            "text_features": text_features,
+            "spatial_shapes": spatial,
+        }
 
 
 # ── DETR Decoder ────────────────────────────────────────────────
 class Sam3DetrDecoderLayer(nn.Module):
-    """DETR decoder layer: self_attn → text_cross_attn → vision_cross_attn → MLP."""
-    def __init__(self, hidden: int = 256, num_heads: int = 8,
-                 intermediate: int = 2048, dropout: float = 0.0):
+    """Keys: self_attn/dropout/layer_norm, text_cross_attn/dropout/layer_norm,
+    vision_cross_attn/dropout/layer_norm, mlp/layer_norm/dropout."""
+    def __init__(self, hidden=256, num_heads=8, intermediate=2048, drop=0.0):
         super().__init__()
-        # Self-attention
         self.self_attn = Sam3Attention(hidden, num_heads)
-        self.self_attn_dropout = nn.Dropout(dropout)
+        self.self_attn_dropout = nn.Dropout(drop)
         self.self_attn_layer_norm = nn.LayerNorm(hidden)
-        # Text cross-attention
+
         self.text_cross_attn = Sam3Attention(hidden, num_heads)
-        self.text_cross_attn_dropout = nn.Dropout(dropout)
+        self.text_cross_attn_dropout = nn.Dropout(drop)
         self.text_cross_attn_layer_norm = nn.LayerNorm(hidden)
-        # Vision cross-attention
-        self.vision_cross_attn = Sam3Attention(hidden, num_heads)
-        self.vision_cross_attn_dropout = nn.Dropout(dropout)
-        self.vision_cross_attn_layer_norm = nn.LayerNorm(hidden)
-        # MLP
-        self.mlp = Sam3MLP(hidden, intermediate)
-        self.mlp_layer_norm = nn.LayerNorm(hidden)
-        self.mlp_dropout = nn.Dropout(dropout)
 
-    def forward(self, x, vision_features, text_features,
-                vision_pos=None, rpb=None):
+        self.vision_cross_attn = Sam3Attention(hidden, num_heads)
+        self.vision_cross_attn_dropout = nn.Dropout(drop)
+        self.vision_cross_attn_layer_norm = nn.LayerNorm(hidden)
+
+        self.mlp = Sam3MLP(hidden, intermediate, drop)
+        self.mlp_layer_norm = nn.LayerNorm(hidden)
+        self.mlp_dropout = nn.Dropout(drop)
+
+    def forward(self, hidden_states, query_pos, text_features, vision_features,
+                vision_pos_encoding, text_cross_attn_mask=None,
+                vision_cross_attn_mask=None):
+        # Pad query_pos for presence token (position 0)
+        query_pos = F.pad(query_pos, (0, 0, 1, 0), value=0)
+
         # Self-attention
-        residual = x
-        x_norm = self.self_attn_layer_norm(x)
-        x = residual + self.self_attn_dropout(self.self_attn(x_norm)[0])
+        residual = hidden_states
+        q_pos = hidden_states + query_pos
+        out, _ = self.self_attn(q_pos, q_pos, hidden_states)
+        hidden_states = residual + self.self_attn_dropout(out)
+        hidden_states = self.self_attn_layer_norm(hidden_states)
 
         # Text cross-attention
-        residual = x
-        x_norm = self.text_cross_attn_layer_norm(x)
-        x = residual + self.text_cross_attn_dropout(
-            self.text_cross_attn(x_norm, text_features, text_features)[0])
+        residual = hidden_states
+        q_pos = hidden_states + query_pos
+        out, _ = self.text_cross_attn(q_pos, text_features, text_features,
+                                       attention_mask=text_cross_attn_mask)
+        hidden_states = residual + self.text_cross_attn_dropout(out)
+        hidden_states = self.text_cross_attn_layer_norm(hidden_states)
 
         # Vision cross-attention
-        residual = x
-        x_norm = self.vision_cross_attn_layer_norm(x)
-        x = residual + self.vision_cross_attn_dropout(
-            self.vision_cross_attn(x_norm, vision_features, vision_features, attn_mask=rpb)[0])
+        residual = hidden_states
+        q_pos = hidden_states + query_pos
+        k_pos = vision_features + vision_pos_encoding
+        out, _ = self.vision_cross_attn(q_pos, k_pos, vision_features,
+                                         attention_mask=vision_cross_attn_mask)
+        hidden_states = residual + self.vision_cross_attn_dropout(out)
+        hidden_states = self.vision_cross_attn_layer_norm(hidden_states)
 
         # MLP
-        residual = x
-        x_norm = self.mlp_layer_norm(x)
-        x = residual + self.mlp_dropout(self.mlp(x_norm))
-        return x
+        residual = hidden_states
+        out = self.mlp(hidden_states)
+        hidden_states = residual + self.mlp_dropout(out)
+        hidden_states = self.mlp_layer_norm(hidden_states)
+        return hidden_states
 
 
 class Sam3DetrDecoder(nn.Module):
-    """6-layer DETR decoder with query-based detection + mask prediction heads."""
-    def __init__(self, hidden: int = 256, num_heads: int = 8,
-                 intermediate: int = 2048, num_layers: int = 6,
-                 num_queries: int = 200):
+    """Keys: layers, output_layer_norm, box_head, query_embed, reference_points,
+    presence_token, presence_head, presence_layer_norm, ref_point_head,
+    box_rpb_embed_x, box_rpb_embed_y, position_encoding."""
+    def __init__(self, hidden=256, num_heads=8, intermediate=2048,
+                 num_layers=6, num_queries=200, drop=0.0):
         super().__init__()
         self.layers = nn.ModuleList([
-            Sam3DetrDecoderLayer(hidden, num_heads, intermediate)
+            Sam3DetrDecoderLayer(hidden, num_heads, intermediate, drop)
             for _ in range(num_layers)
         ])
         self.output_layer_norm = nn.LayerNorm(hidden)
-
-        # Detection heads
         self.box_head = Sam3DecoderMLP(hidden, hidden, 4, num_layers=3)
         self.query_embed = nn.Embedding(num_queries, hidden)
         self.reference_points = nn.Embedding(num_queries, 4)
 
-        # Presence detection
         self.presence_token = nn.Embedding(1, hidden)
         self.presence_head = Sam3DecoderMLP(hidden, hidden, 1, num_layers=3)
         self.presence_layer_norm = nn.LayerNorm(hidden)
 
-        # Reference point refinement
-        self.ref_point_head = Sam3DecoderMLP(hidden * 2, hidden, hidden, num_layers=2)
-
-        # Box relative position bias
+        self.ref_point_head = Sam3DecoderMLP(2 * hidden, hidden, hidden, num_layers=2)
         self.box_rpb_embed_x = Sam3DecoderMLP(2, hidden, num_heads, num_layers=2)
         self.box_rpb_embed_y = Sam3DecoderMLP(2, hidden, num_heads, num_layers=2)
 
-        self.position_encoding = Sam3SinePositionEmbedding(hidden)
-        self.num_queries = num_queries
-        self.num_layers = len(self.layers)
+        self.position_encoding = Sam3SinePositionEmbedding(
+            num_pos_feats=hidden // 2, normalize=False)
+        self.num_heads = num_heads
+        self.clamp_presence_logit_max_val = 10.0
 
-    def forward(self, vision_features, text_features, vision_pos=None):
+    def _get_rpb_matrix(self, ref_boxes, spatial_shape):
+        H, W = spatial_shape
+        boxes_xyxy = box_cxcywh_to_xyxy(ref_boxes)
+        B, Q, _ = boxes_xyxy.shape
+        coords_h = torch.arange(0, H, device=ref_boxes.device, dtype=ref_boxes.dtype) / H
+        coords_w = torch.arange(0, W, device=ref_boxes.device, dtype=ref_boxes.dtype) / W
+        dy = coords_h.view(1, -1, 1) - boxes_xyxy.reshape(-1, 1, 4)[:, :, 1:4:2]
+        dy = dy.view(B, Q, -1, 2)
+        dx = coords_w.view(1, -1, 1) - boxes_xyxy.reshape(-1, 1, 4)[:, :, 0:3:2]
+        dx = dx.view(B, Q, -1, 2)
+        dx_log = dx * 8
+        dx_log = torch.sign(dx_log) * torch.log2(torch.abs(dx_log) + 1.0) / math.log2(8)
+        dy_log = dy * 8
+        dy_log = torch.sign(dy_log) * torch.log2(torch.abs(dy_log) + 1.0) / math.log2(8)
+        dx_emb = self.box_rpb_embed_x(dx_log)
+        dy_emb = self.box_rpb_embed_y(dy_log)
+        rpb = dy_emb.unsqueeze(3) + dx_emb.unsqueeze(2)
+        rpb = rpb.flatten(2, 3).permute(0, 3, 1, 2).contiguous()
+        return rpb
+
+    def forward(self, vision_features, text_features, vision_pos_encoding,
+                text_mask=None, spatial_shapes=None):
         B = vision_features.shape[0]
-        dev = vision_features.device
-
-        # Initialize queries
         queries = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)
-        ref_pts = self.reference_points.weight.sigmoid().unsqueeze(0).expand(B, -1, -1)
+        ref_boxes = self.reference_points.weight.unsqueeze(0).expand(B, -1, -1).sigmoid()
         presence = self.presence_token.weight.unsqueeze(0).expand(B, -1, -1)
-
-        # Prepend presence token
-        x = torch.cat([presence, queries], dim=1)  # [B, 201, 256]
+        hidden_states = torch.cat([presence, queries], dim=1)
 
         intermediates = []
+        intermediate_boxes = [ref_boxes]
+        intermediate_presence = []
+
         for layer in self.layers:
-            x = layer(x, vision_features, text_features, vision_pos)
-            intermediates.append(x[:, 1:, :])  # Skip presence token
+            ref_input = ref_boxes.unsqueeze(2)
+            query_sine = self.position_encoding.encode_boxes(ref_input[:, :, 0, :])
+            query_pos = self.ref_point_head(query_sine)
 
-        # Final outputs
-        x_final = self.output_layer_norm(x[:, 1:, :])  # [B, 200, 256]
-        presence_out = self.presence_layer_norm(x[:, :1, :])
+            vision_cross_attn_mask = None
+            if spatial_shapes is not None and spatial_shapes.shape[0] == 1:
+                rpb = self._get_rpb_matrix(ref_boxes, (spatial_shapes[0, 0], spatial_shapes[0, 1]))
+                vision_cross_attn_mask = F.pad(rpb, (0, 0, 1, 0), value=0)
 
-        # Intermediate stack
-        inter_stack = torch.stack(intermediates, dim=0)  # [6, B, 200, 256]
+            hidden_states = layer(hidden_states, query_pos, text_features,
+                                   vision_features, vision_pos_encoding,
+                                   vision_cross_attn_mask=vision_cross_attn_mask)
 
-        # Box predictions from all layers
-        boxes = self.box_head(inter_stack).sigmoid()  # [6, B, 200, 4]
+            query_hs = hidden_states[:, 1:]
+            ref_before = inverse_sigmoid(ref_boxes)
+            delta = self.box_head(self.output_layer_norm(query_hs))
+            new_ref = (delta + ref_before).sigmoid()
+            ref_boxes = new_ref.detach()
 
-        # Presence prediction
-        presence_logit = self.presence_head(presence_out)  # [B, 1, 1]
+            intermediates.append(self.output_layer_norm(query_hs))
+            intermediate_boxes.append(new_ref)
+
+            p_hidden = hidden_states[:, :1]
+            p_logit = self.presence_head(self.presence_layer_norm(p_hidden)).squeeze(-1)
+            p_logit = p_logit.clamp(-self.clamp_presence_logit_max_val,
+                                     self.clamp_presence_logit_max_val)
+            intermediate_presence.append(p_logit)
 
         return {
-            "intermediate_hidden_states": inter_stack,
-            "reference_points": ref_pts,
-            "last_hidden_state": x_final,
-            "pred_boxes": boxes,
-            "presence_logit": presence_logit,
+            "intermediate_hidden_states": torch.stack(intermediates),
+            "reference_boxes": torch.stack(intermediate_boxes[:-1]),
+            "presence_logits": torch.stack(intermediate_presence),
         }
 
 
 # ── Geometry Encoder ────────────────────────────────────────────
 class Sam3GeometryEncoderLayer(nn.Module):
-    def __init__(self, hidden: int = 256, num_heads: int = 8,
-                 intermediate: int = 2048):
+    """Keys: layer_norm1, self_attn, dropout, cross_attn, layer_norm2, mlp, layer_norm3."""
+    def __init__(self, hidden=256, num_heads=8, intermediate=2048, drop=0.0):
         super().__init__()
         self.layer_norm1 = nn.LayerNorm(hidden)
         self.self_attn = Sam3Attention(hidden, num_heads)
-        self.dropout = nn.Dropout(0.0)
+        self.dropout = nn.Dropout(drop)
         self.cross_attn = Sam3Attention(hidden, num_heads)
         self.layer_norm2 = nn.LayerNorm(hidden)
-        self.mlp = Sam3MLP(hidden, intermediate)
+        self.mlp = Sam3MLP(hidden, intermediate, drop)
         self.layer_norm3 = nn.LayerNorm(hidden)
 
-    def forward(self, x, vision_features):
-        residual = x
-        x = self.layer_norm1(x)
-        x = residual + self.self_attn(x)[0]
-        residual = x
-        x = residual + self.cross_attn(x, vision_features, vision_features)[0]
-        residual = x
-        x = self.layer_norm2(x)
-        x = residual + self.mlp(x)
-        return self.layer_norm3(x)
+    def forward(self, prompt_feats, vision_feats, vision_pos):
+        residual = prompt_feats
+        h = self.layer_norm1(prompt_feats)
+        h, _ = self.self_attn(h, h, h)
+        h = self.dropout(h) + residual
+        residual = h
+        h = self.layer_norm2(h)
+        k = vision_feats + vision_pos
+        h, _ = self.cross_attn(h, k, vision_feats)
+        h = self.dropout(h) + residual
+        residual = h
+        h = self.layer_norm3(h)
+        h = self.mlp(h)
+        h = self.dropout(h) + residual
+        return h
 
 
 class Sam3GeometryEncoder(nn.Module):
-    """Encodes geometric prompts (boxes, points) for conditioning the decoder."""
-    def __init__(self, hidden: int = 256, num_layers: int = 3):
+    """Keys: position_encoding, label_embed, cls_embed, boxes_direct_project,
+    boxes_pool_project, boxes_pos_enc_project, vision_layer_norm, final_proj,
+    prompt_layer_norm, layers, output_layer_norm."""
+    def __init__(self, hidden=256, num_layers=3, roi_size=7, num_heads=8,
+                 intermediate=2048, drop=0.0):
         super().__init__()
-        self.position_encoding = Sam3SinePositionEmbedding(hidden)
+        self.hidden_size = hidden
+        self.roi_size = roi_size
+        self.position_encoding = Sam3SinePositionEmbedding(
+            num_pos_feats=hidden // 2, normalize=True)
         self.label_embed = nn.Embedding(2, hidden)
         self.cls_embed = nn.Embedding(1, hidden)
         self.boxes_direct_project = nn.Linear(4, hidden)
-        self.boxes_pool_project = nn.Conv2d(hidden, hidden, 7, padding=3)
+        self.boxes_pool_project = nn.Conv2d(hidden, hidden, roi_size)
         self.boxes_pos_enc_project = nn.Linear(hidden + 2, hidden)
         self.vision_layer_norm = nn.LayerNorm(hidden)
         self.final_proj = nn.Linear(hidden, hidden)
         self.prompt_layer_norm = nn.LayerNorm(hidden)
         self.layers = nn.ModuleList([
-            Sam3GeometryEncoderLayer(hidden) for _ in range(num_layers)
+            Sam3GeometryEncoderLayer(hidden, num_heads, intermediate, drop)
+            for _ in range(num_layers)
         ])
         self.output_layer_norm = nn.LayerNorm(hidden)
 
-    def forward(self, boxes=None, points=None, vision_features=None):
-        """Encode geometric prompts."""
+    def forward(self, boxes=None, points=None, vision_features=None,
+                vision_pos=None):
         B = vision_features.shape[0] if vision_features is not None else 1
         dev = vision_features.device if vision_features is not None else boxes.device
-
         prompts = []
         if boxes is not None:
-            box_embed = self.boxes_direct_project(boxes)
-            prompts.append(box_embed)
-        if points is not None:
-            # Point prompts encoded as label embeddings
-            point_embed = self.label_embed(points["labels"])
-            prompts.append(point_embed)
-
+            prompts.append(self.boxes_direct_project(boxes))
         if len(prompts) == 0:
             return None
-
         x = torch.cat(prompts, dim=1) if len(prompts) > 1 else prompts[0]
-        x = self.prompt_layer_norm(x)
-
+        x = self.prompt_layer_norm(self.final_proj(x))
         if vision_features is not None:
-            v = self.vision_layer_norm(vision_features)
+            v = vision_features.flatten(2).transpose(1, 2)
+            vp = vision_pos.flatten(2).transpose(1, 2) if vision_pos is not None else torch.zeros_like(v)
             for layer in self.layers:
-                x = layer(x, v)
+                x = layer(x, v, vp)
+        return {"last_hidden_state": self.output_layer_norm(x)}
 
-        x = self.output_layer_norm(self.final_proj(x))
-        return x
+
+# ── Pixel Decoder (FPN fusion for masks) ────────────────────────
+class Sam3PixelDecoder(nn.Module):
+    """Keys: conv_layers, norms."""
+    def __init__(self, hidden=256, num_stages=3):
+        super().__init__()
+        self.conv_layers = nn.ModuleList([
+            nn.Conv2d(hidden, hidden, 3, padding=1) for _ in range(num_stages)
+        ])
+        self.norms = nn.ModuleList([
+            nn.GroupNorm(8, hidden) for _ in range(num_stages)
+        ])
+
+    def forward(self, backbone_features):
+        """backbone_features: list of [B, C, H, W] from fine to coarse."""
+        prev = backbone_features[-1]
+        for i, feat in enumerate(reversed(backbone_features[:-1])):
+            prev = F.interpolate(prev, size=feat.shape[-2:], mode="nearest")
+            prev = prev + feat
+            prev = self.conv_layers[i](prev)
+            prev = self.norms[i](prev)
+            prev = F.relu(prev)
+        return prev
 
 
 # ── Mask Decoder ────────────────────────────────────────────────
-class Sam3PixelDecoder(nn.Module):
-    """Progressive upsampling from multi-scale FPN features."""
-    def __init__(self, hidden: int = 256):
-        super().__init__()
-        self.conv_layers = nn.ModuleList([
-            nn.Conv2d(hidden, hidden, 3, padding=1),
-            nn.Conv2d(hidden, hidden, 3, padding=1),
-            nn.Conv2d(hidden, hidden, 3, padding=1),
-        ])
-        self.norms = nn.ModuleList([
-            nn.GroupNorm(32, hidden),
-            nn.GroupNorm(32, hidden),
-            nn.GroupNorm(32, hidden),
-        ])
-
-    def forward(self, features):
-        """features: tuple of multi-scale FPN outputs (high-res first)."""
-        # Progressive fusion: smallest → largest
-        x = features[2]  # [B, 256, 72, 72]
-        # Upsample and fuse with 144
-        x = F.interpolate(x, size=features[1].shape[2:], mode="bilinear", align_corners=False)
-        x = x + features[1]
-        x = self.norms[0](self.conv_layers[0](F.gelu(x)))
-        # Upsample and fuse with 288
-        x = F.interpolate(x, size=features[0].shape[2:], mode="bilinear", align_corners=False)
-        x = x + features[0]
-        x = self.norms[1](self.conv_layers[1](F.gelu(x)))
-        # Final refinement
-        x = self.norms[2](self.conv_layers[2](F.gelu(x)))
-        return x  # [B, 256, 288, 288]
-
-
 class Sam3MaskDecoder(nn.Module):
-    """Produces final segmentation masks from decoder outputs + pixel features."""
-    def __init__(self, hidden: int = 256, num_heads: int = 8):
+    """Keys: pixel_decoder, mask_embedder, instance_projection,
+    semantic_projection, prompt_cross_attn, prompt_cross_attn_norm,
+    prompt_cross_attn_dropout."""
+    def __init__(self, hidden=256, num_heads=8, num_upsampling_stages=3,
+                 drop=0.0):
         super().__init__()
-        self.pixel_decoder = Sam3PixelDecoder(hidden)
+        self.pixel_decoder = Sam3PixelDecoder(hidden, num_upsampling_stages)
         self.mask_embedder = Sam3MaskEmbedder(hidden)
         self.instance_projection = nn.Conv2d(hidden, hidden, 1)
         self.semantic_projection = nn.Conv2d(hidden, 1, 1)
-
-        # Prompt-based cross-attention for text conditioning
         self.prompt_cross_attn = Sam3Attention(hidden, num_heads)
         self.prompt_cross_attn_norm = nn.LayerNorm(hidden)
-        self.prompt_cross_attn_dropout = nn.Dropout(0.0)
+        self.prompt_cross_attn_dropout = nn.Dropout(drop)
 
-    def forward(self, decoder_output, multi_scale_features, text_features=None):
-        """
-        Args:
-            decoder_output: [B, num_queries, 256] from DETR decoder
-            multi_scale_features: tuple of 4 FPN feature maps
-            text_features: [B, seq_len, 256] projected text
-        Returns:
-            pred_masks: [B, num_queries, H, W] instance masks
-            semantic_seg: [B, 1, H, W] semantic segmentation
-        """
-        # Pixel features from FPN
-        pixel_features = self.pixel_decoder(multi_scale_features[:3])  # [B, 256, 288, 288]
+    def forward(self, decoder_queries, backbone_features, encoder_hidden_states,
+                prompt_features=None, prompt_mask=None):
+        # Replace finest backbone feature with encoder vision features
+        feats = [f.clone() for f in backbone_features]
+        spatial_dim = feats[-1].shape[-2] * feats[-1].shape[-1]
+        enc_vis = encoder_hidden_states[:, :spatial_dim, :]
+        B, _, C = enc_vis.shape
+        H, W = feats[-1].shape[-2:]
+        feats[-1] = enc_vis.transpose(1, 2).reshape(B, C, H, W)
 
-        # Text conditioning via cross-attention
-        if text_features is not None:
-            B, N, C = pixel_features.shape[0], pixel_features.shape[2] * pixel_features.shape[3], pixel_features.shape[1]
-            pf_flat = pixel_features.flatten(2).transpose(1, 2)  # [B, H*W, C]
-            pf_flat = pf_flat + self.prompt_cross_attn_dropout(
-                self.prompt_cross_attn(
-                    self.prompt_cross_attn_norm(pf_flat), text_features, text_features
-                )[0]
-            )
-            pixel_features = pf_flat.transpose(1, 2).reshape(B, C, pixel_features.shape[2], pixel_features.shape[3])
+        if prompt_features is not None:
+            residual = encoder_hidden_states
+            normed = self.prompt_cross_attn_norm(encoder_hidden_states)
+            out, _ = self.prompt_cross_attn(normed, prompt_features, prompt_features)
+            encoder_hidden_states = residual + self.prompt_cross_attn_dropout(out)
 
-        # Instance masks via dot product
-        mask_embed = self.mask_embedder(decoder_output)  # [B, queries, 256]
-        instance_feat = self.instance_projection(pixel_features)  # [B, 256, H, W]
-        pred_masks = torch.einsum("bqc,bchw->bqhw", mask_embed, instance_feat)
-
-        # Semantic segmentation
-        semantic_seg = self.semantic_projection(pixel_features)
-
-        return {
-            "pred_masks": pred_masks,
-            "semantic_seg": semantic_seg,
-        }
+        pixel_embed = self.pixel_decoder(feats)
+        instance_embed = self.instance_projection(pixel_embed)
+        mask_embed = self.mask_embedder(decoder_queries)
+        pred_masks = torch.einsum("bqc,bchw->bqhw", mask_embed, instance_embed)
+        semantic_seg = self.semantic_projection(pixel_embed)
+        return {"pred_masks": pred_masks, "semantic_seg": semantic_seg}
 
 
 # ── Dot Product Scoring ─────────────────────────────────────────
 class Sam3DotProductScoring(nn.Module):
-    """Scores query-text alignment for text-conditioned detection."""
-    def __init__(self, hidden: int = 256, intermediate: int = 2048):
+    """Keys: text_mlp, text_mlp_dropout, text_mlp_out_norm, text_proj, query_proj."""
+    def __init__(self, hidden=256, intermediate=2048, drop=0.0):
         super().__init__()
-        self.text_mlp = Sam3MLP(hidden, intermediate)
-        self.text_mlp_dropout = nn.Dropout(0.0)
+        self.text_mlp = Sam3DecoderMLP(hidden, intermediate, hidden, num_layers=2)
+        self.text_mlp_dropout = nn.Dropout(drop)
         self.text_mlp_out_norm = nn.LayerNorm(hidden)
         self.text_proj = nn.Linear(hidden, hidden)
         self.query_proj = nn.Linear(hidden, hidden)
+        self.scale = float(1.0 / (hidden ** 0.5))
+        self.clamp_max_val = 12.0
 
-    def forward(self, query_embeds, text_embeds):
-        """
-        query_embeds: [layers, B, queries, hidden]
-        text_embeds: [B, seq, hidden]
-        """
-        text = self.text_mlp_out_norm(text_embeds + self.text_mlp_dropout(self.text_mlp(text_embeds)))
-        text_pooled = text.mean(dim=1)  # [B, hidden]
-        text_proj = self.text_proj(text_pooled)  # [B, hidden]
-        query_proj = self.query_proj(query_embeds)  # [L, B, Q, hidden]
-        # Dot product scoring
-        scores = (query_proj * text_proj.unsqueeze(0).unsqueeze(2)).sum(dim=-1, keepdim=True)
-        return scores  # [L, B, Q, 1]
+    def forward(self, decoder_hidden_states, text_features, text_mask=None):
+        """decoder_hidden_states: [L, B, Q, C], text_features: [B, S, C]."""
+        orig = text_features
+        text_features = self.text_mlp(text_features)
+        text_features = self.text_mlp_dropout(text_features)
+        text_features = text_features + orig
+        text_features = self.text_mlp_out_norm(text_features)
+        if text_mask is not None:
+            is_valid = text_mask.to(text_features.dtype).unsqueeze(-1)
+            num_valid = is_valid.sum(dim=1).clamp(min=1.0)
+            pooled = (text_features * is_valid).sum(dim=1) / num_valid
+        else:
+            pooled = text_features.mean(dim=1)
+        proj_text = self.text_proj(pooled).unsqueeze(-1)
+        proj_queries = self.query_proj(decoder_hidden_states)
+        scores = torch.matmul(proj_queries, proj_text.unsqueeze(0)) * self.scale
+        scores = scores.clamp(-self.clamp_max_val, self.clamp_max_val)
+        return scores

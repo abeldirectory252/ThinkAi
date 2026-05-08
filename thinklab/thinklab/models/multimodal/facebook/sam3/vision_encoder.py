@@ -1,233 +1,347 @@
 """
-SAM3 Vision Encoder: ViT backbone (32 layers) + FPN Neck.
-Input:  [B, 3, 1008, 1008]
-Output: Multi-scale features via FPN Neck
-        ([B, 256, 288, 288], [B, 256, 144, 144], [B, 256, 72, 72], [B, 256, 36, 36])
+SAM3 Vision Encoder — ViT backbone (RoPE) + FPN Neck.
+All key names match HuggingFace exactly.
+
+HF key hierarchy:
+  vision_encoder.backbone.embeddings.*
+  vision_encoder.backbone.layer_norm.*
+  vision_encoder.backbone.layers.{i}.layer_norm1/attention/rotary_emb/layer_norm2/mlp/dropout
+  vision_encoder.neck.position_encoding.* (no params)
+  vision_encoder.neck.fpn_layers.{i}.scale_layers/proj1/proj2
 """
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .layers import Sam3SinePositionEmbedding
+from .layers import Sam3MLP, Sam3SinePositionEmbedding
 
 
-# ── ViT Patch Embeddings ────────────────────────────────────────
-class Sam3ViTPatchEmbeddings(nn.Module):
-    def __init__(self, hidden: int = 1024, image_size: int = 1008, patch_size: int = 14):
+# ── RoPE helpers ────────────────────────────────────────────────
+def rotate_pairwise(x):
+    x = x.view(*x.shape[:-1], -1, 2)
+    x1, x2 = x.unbind(dim=-1)
+    x = torch.stack((-x2, x1), dim=-1)
+    return x.flatten(start_dim=-2)
+
+
+def apply_rotary_pos_emb_2d(q, k, cos, sin):
+    q_embed = q.float()
+    q_embed = (q_embed * cos) + (rotate_pairwise(q_embed) * sin)
+    k_embed = k.float()
+    k_embed = (k_embed * cos) + (rotate_pairwise(k_embed) * sin)
+    return q_embed.type_as(q), k_embed.type_as(k)
+
+
+# ── ViT Rotary Embedding ───────────────────────────────────────
+class Sam3ViTRotaryEmbedding(nn.Module):
+    """2D axial RoPE. Buffers: rope_embeddings_cos, rope_embeddings_sin."""
+    def __init__(self, hidden_size, num_heads, end_x, end_y,
+                 rope_theta=10000.0, scale=1.0):
         super().__init__()
-        self.projection = nn.Conv2d(3, hidden, kernel_size=patch_size, stride=patch_size)
+        dim = hidden_size // num_heads
+        self.end_x, self.end_y = end_x, end_y
+        self.dim = dim
+        self.rope_theta = rope_theta
+        self.scale = scale
+        freqs = 1.0 / (rope_theta ** (torch.arange(0, dim, 4)[: (dim // 4)].float() / dim))
+        flat = torch.arange(end_x * end_y, dtype=torch.long)
+        x_pos = (flat % end_x) * scale
+        y_pos = torch.div(flat, end_x, rounding_mode="floor") * scale
+        freqs_x = torch.outer(x_pos, freqs).float()
+        freqs_y = torch.outer(y_pos, freqs).float()
+        inv_freq = torch.cat([freqs_x, freqs_y], dim=-1).repeat_interleave(2, dim=-1)
+        self.register_buffer("rope_embeddings_cos", inv_freq.cos(), persistent=False)
+        self.register_buffer("rope_embeddings_sin", inv_freq.sin(), persistent=False)
 
-    def forward(self, pixel_values):
-        x = self.projection(pixel_values)  # [B, C, H/P, W/P]
-        return x.flatten(2).transpose(1, 2)  # [B, N, C]
+    @torch.no_grad()
+    def forward(self):
+        return self.rope_embeddings_cos, self.rope_embeddings_sin
 
 
-class Sam3ViTEmbeddings(nn.Module):
-    def __init__(self, hidden: int = 1024, image_size: int = 1008, patch_size: int = 14):
-        super().__init__()
-        num_patches = (image_size // patch_size) ** 2  # 5184
-        self.patch_embeddings = Sam3ViTPatchEmbeddings(hidden, image_size, patch_size)
-        self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches, hidden))
-        self.dropout = nn.Dropout(0.0)
-
-    def forward(self, pixel_values):
-        x = self.patch_embeddings(pixel_values)
-        x = x + self.position_embeddings
-        return self.dropout(x)
-
-
-# ── ViT Attention (windowed) ────────────────────────────────────
-class Sam3ViTAttention(nn.Module):
-    def __init__(self, hidden: int = 1024, num_heads: int = 16):
+# ── ViT RoPE Attention ─────────────────────────────────────────
+class Sam3ViTRoPEAttention(nn.Module):
+    """Self-attention with RoPE. Keys: q_proj, k_proj, v_proj, o_proj.
+    Input/output: [B, H, W, C] spatial format.
+    """
+    def __init__(self, hidden_size=1024, num_heads=16):
         super().__init__()
         self.num_heads = num_heads
-        self.head_dim = hidden // num_heads
+        self.head_dim = hidden_size // num_heads
         self.scale = self.head_dim ** -0.5
-        self.qkv = nn.Linear(hidden, hidden * 3)
-        self.proj = nn.Linear(hidden, hidden)
+        self.q_proj = nn.Linear(hidden_size, hidden_size)
+        self.k_proj = nn.Linear(hidden_size, hidden_size)
+        self.v_proj = nn.Linear(hidden_size, hidden_size)
+        self.o_proj = nn.Linear(hidden_size, hidden_size)
 
-    def forward(self, x):
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
-        qkv = qkv.permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
-        out = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
-        out = out.transpose(1, 2).reshape(B, N, C)
-        return self.proj(out)
+    def forward(self, hidden_states, position_embeddings):
+        B, H, W, _ = hidden_states.shape
+        seq_len = H * W
+        new_shape = (B, seq_len, self.num_heads, self.head_dim)
+        q = self.q_proj(hidden_states).view(*new_shape).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(*new_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(*new_shape).transpose(1, 2)
+        cos, sin = position_embeddings
+        q, k = apply_rotary_pos_emb_2d(q, k, cos, sin)
+        attn_w = (q @ k.transpose(-2, -1)) * self.scale
+        attn_w = F.softmax(attn_w, dim=-1)
+        out = (attn_w @ v).transpose(1, 2).reshape(B, H, W, -1).contiguous()
+        return self.o_proj(out), attn_w
 
 
-class Sam3ViTMLP(nn.Module):
-    def __init__(self, hidden: int = 1024, intermediate: int = 4096):
+# ── Window partition/unpartition ────────────────────────────────
+def window_partition(hidden_state, window_size):
+    """[B, H, W, C] → [B*nW, ws, ws, C], (pH, pW)."""
+    B, H, W, C = hidden_state.shape
+    pH = (window_size - H % window_size) % window_size
+    pW = (window_size - W % window_size) % window_size
+    hidden_state = F.pad(hidden_state, (0, 0, 0, pW, 0, pH))
+    Hp, Wp = H + pH, W + pW
+    hidden_state = hidden_state.view(B, Hp // window_size, window_size,
+                                      Wp // window_size, window_size, C)
+    windows = hidden_state.permute(0, 1, 3, 2, 4, 5).contiguous()
+    windows = windows.view(-1, window_size, window_size, C)
+    return windows, (Hp, Wp)
+
+
+def window_unpartition(windows, window_size, pad_hw, orig_hw):
+    """[B*nW, ws, ws, C] → [B, H, W, C]."""
+    Hp, Wp = pad_hw
+    H, W = orig_hw
+    B = windows.shape[0] // (Hp * Wp // window_size // window_size)
+    x = windows.view(B, Hp // window_size, Wp // window_size,
+                      window_size, window_size, -1)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
+    x = x.view(B, Hp, Wp, -1)
+    return x[:, :H, :W, :].contiguous()
+
+
+# ── Patch Embeddings ────────────────────────────────────────────
+class Sam3ViTPatchEmbeddings(nn.Module):
+    """Keys: projection (Conv2d, bias=False)."""
+    def __init__(self, hidden_size=1024, patch_size=14, num_channels=3,
+                 pretrain_image_size=1008):
         super().__init__()
-        self.fc1 = nn.Linear(hidden, intermediate)
-        self.fc2 = nn.Linear(intermediate, hidden)
+        ps = patch_size if isinstance(patch_size, (list, tuple)) else (patch_size, patch_size)
+        ims = pretrain_image_size if isinstance(pretrain_image_size, (list, tuple)) else (pretrain_image_size, pretrain_image_size)
+        self.num_patches = (ims[0] // ps[0]) * (ims[1] // ps[1])
+        self.patch_size = ps
+        self.projection = nn.Conv2d(num_channels, hidden_size,
+                                     kernel_size=ps, stride=ps, bias=False)
 
-    def forward(self, x):
-        return self.fc2(F.gelu(self.fc1(x)))
+    def forward(self, pixel_values):
+        return self.projection(pixel_values.to(self.projection.weight.dtype)).flatten(2).transpose(1, 2)
 
 
+# ── ViT Embeddings ──────────────────────────────────────────────
+class Sam3ViTEmbeddings(nn.Module):
+    """Keys: patch_embeddings, position_embeddings, dropout."""
+    def __init__(self, hidden_size=1024, patch_size=14, pretrain_image_size=1008,
+                 num_channels=3, dropout=0.0):
+        super().__init__()
+        self.patch_embeddings = Sam3ViTPatchEmbeddings(
+            hidden_size, patch_size, num_channels, pretrain_image_size)
+        num_patches = self.patch_embeddings.num_patches
+        self.position_embeddings = nn.Parameter(torch.randn(1, num_patches, hidden_size))
+        self.dropout = nn.Dropout(dropout)
+        self.patch_size = patch_size
+
+    def _tile_position_embeddings(self, pos_embed, height, width):
+        pretrain_size = int(pos_embed.shape[1] ** 0.5)
+        if pretrain_size == height and pretrain_size == width:
+            return pos_embed.reshape(1, height * width, -1)
+        C = pos_embed.shape[-1]
+        pe = pos_embed.reshape(1, pretrain_size, pretrain_size, C).permute(0, 3, 1, 2)
+        rh = height // pretrain_size + 1
+        rw = width // pretrain_size + 1
+        pe = pe.tile([1, 1, rh, rw])[:, :, :height, :width]
+        return pe.permute(0, 2, 3, 1).reshape(1, height * width, C)
+
+    def forward(self, pixel_values):
+        H, W = pixel_values.shape[-2:]
+        embeddings = self.patch_embeddings(pixel_values)
+        hp = H // self.patch_size
+        wp = W // self.patch_size
+        pos = self._tile_position_embeddings(self.position_embeddings, hp, wp)
+        return self.dropout(embeddings + pos)
+
+
+# ── ViT Layer ───────────────────────────────────────────────────
 class Sam3ViTLayer(nn.Module):
-    """Single ViT encoder layer with window attention."""
-    def __init__(self, hidden: int = 1024, num_heads: int = 16,
-                 intermediate: int = 4096, window_size: int = 8):
+    """Keys: layer_norm1, rotary_emb, attention, layer_norm2, mlp, dropout."""
+    def __init__(self, hidden_size=1024, num_heads=16, intermediate_size=4096,
+                 image_size=1008, patch_size=14, window_size=0,
+                 global_window_size=8, layer_norm_eps=1e-6, dropout=0.0,
+                 rope_theta=10000.0):
         super().__init__()
-        self.layernorm_before = nn.LayerNorm(hidden)
-        self.attention = Sam3ViTAttention(hidden, num_heads)
-        self.layernorm_after = nn.LayerNorm(hidden)
-        self.mlp = Sam3ViTMLP(hidden, intermediate)
+        ims = image_size if isinstance(image_size, (list, tuple)) else (image_size, image_size)
+        ps = patch_size if isinstance(patch_size, (list, tuple)) else (patch_size, patch_size)
+        input_size = (ims[0] // ps[0], ims[1] // ps[1])
+
+        self.layer_norm1 = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+        rotary_input_size = input_size if window_size == 0 else (window_size, window_size)
+        rotary_scale = global_window_size / rotary_input_size[0]
+        self.rotary_emb = Sam3ViTRotaryEmbedding(
+            hidden_size, num_heads,
+            end_x=rotary_input_size[0], end_y=rotary_input_size[1],
+            rope_theta=rope_theta, scale=rotary_scale)
+        self.attention = Sam3ViTRoPEAttention(hidden_size, num_heads)
+        self.layer_norm2 = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+        self.mlp = Sam3MLP(hidden_size, intermediate_size, dropout)
+        self.dropout = nn.Dropout(dropout)
         self.window_size = window_size
 
-    def _window_partition(self, x, H, W):
-        """Partition spatial features into non-overlapping windows."""
-        B, N, C = x.shape
-        ws = self.window_size
-        if H % ws != 0 or W % ws != 0:
-            # Pad if needed
-            pH = (ws - H % ws) % ws
-            pW = (ws - W % ws) % ws
-            x = x.reshape(B, H, W, C)
-            x = F.pad(x, (0, 0, 0, pW, 0, pH))
-            H, W = H + pH, W + pW
-            x = x.reshape(B, H * W, C)
-        x = x.reshape(B, H // ws, ws, W // ws, ws, C)
-        windows = x.permute(0, 1, 3, 2, 4, 5).reshape(-1, ws * ws, C)
-        return windows, H, W
-
-    def _window_unpartition(self, windows, H, W, orig_H, orig_W):
-        B_windows = windows.shape[0]
-        ws = self.window_size
-        B = B_windows // ((H // ws) * (W // ws))
-        x = windows.reshape(B, H // ws, W // ws, ws, ws, -1)
-        x = x.permute(0, 1, 3, 2, 4, 5).reshape(B, H * W, -1)
-        if H != orig_H or W != orig_W:
-            x = x.reshape(B, H, W, -1)[:, :orig_H, :orig_W, :].reshape(B, orig_H * orig_W, -1)
-        return x
-
-    def forward(self, x, spatial_shape=None):
-        H = W = int(x.shape[1] ** 0.5) if spatial_shape is None else spatial_shape[0]
-        if spatial_shape is not None:
-            H, W = spatial_shape
-
-        residual = x
-        x = self.layernorm_before(x)
-        # Window partition for efficient attention
-        x_win, pH, pW = self._window_partition(x, H, W)
-        x_win = self.attention(x_win)
-        x = self._window_unpartition(x_win, pH, pW, H, W)
-        x = residual + x
-
-        residual = x
-        x = self.layernorm_after(x)
-        x = self.mlp(x)
-        x = residual + x
-        return x
+    def forward(self, hidden_states):
+        residual = hidden_states
+        hidden_states = self.layer_norm1(hidden_states)
+        if self.window_size > 0:
+            H, W = hidden_states.shape[1], hidden_states.shape[2]
+            hidden_states, pad_hw = window_partition(hidden_states, self.window_size)
+        pos = self.rotary_emb()
+        hidden_states, _ = self.attention(hidden_states, pos)
+        if self.window_size > 0:
+            hidden_states = window_unpartition(hidden_states, self.window_size, pad_hw, (H, W))
+        hidden_states = residual + hidden_states
+        residual = hidden_states
+        hidden_states = self.layer_norm2(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + self.dropout(hidden_states)
+        return hidden_states
 
 
 # ── ViT Backbone ────────────────────────────────────────────────
 class Sam3ViTModel(nn.Module):
-    """ViT-Large backbone: 32 layers, hidden=1024, image=1008, patch=14."""
-    def __init__(self, hidden: int = 1024, num_heads: int = 16,
-                 intermediate: int = 4096, num_layers: int = 32,
-                 image_size: int = 1008, patch_size: int = 14,
-                 window_size: int = 8):
+    """Keys: embeddings, layer_norm, layers."""
+    def __init__(self, hidden_size=1024, num_heads=16, intermediate_size=4096,
+                 num_layers=32, image_size=1008, patch_size=14,
+                 pretrain_image_size=1008, window_size=8,
+                 global_attn_indexes=None, layer_norm_eps=1e-6,
+                 dropout=0.0, rope_theta=10000.0):
         super().__init__()
-        self.embeddings = Sam3ViTEmbeddings(hidden, image_size, patch_size)
+        if global_attn_indexes is None:
+            global_attn_indexes = []
+        self.embeddings = Sam3ViTEmbeddings(hidden_size, patch_size,
+                                             pretrain_image_size, dropout=dropout)
+        self.layer_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
         self.layers = nn.ModuleList([
-            Sam3ViTLayer(hidden, num_heads, intermediate, window_size)
-            for _ in range(num_layers)
+            Sam3ViTLayer(
+                hidden_size, num_heads, intermediate_size,
+                image_size, patch_size,
+                window_size=window_size if i not in global_attn_indexes else 0,
+                global_window_size=window_size,
+                layer_norm_eps=layer_norm_eps, dropout=dropout,
+                rope_theta=rope_theta)
+            for i in range(num_layers)
         ])
-        self.layer_norm = nn.LayerNorm(hidden)
-        self.grid_size = image_size // patch_size  # 72
+        self.patch_size = patch_size
 
     def forward(self, pixel_values):
-        x = self.embeddings(pixel_values)  # [B, 5184, 1024]
-        H = W = self.grid_size
+        x = self.embeddings(pixel_values)  # [B, N, C]
+        B = x.shape[0]
+        H = pixel_values.shape[-2] // self.patch_size
+        W = pixel_values.shape[-1] // self.patch_size
+        C = x.shape[-1]
+        # Reshape to spatial for windowed attention
+        x = x.view(B, H, W, C)
+        x = self.layer_norm(x)
         for layer in self.layers:
-            x = layer(x, spatial_shape=(H, W))
-        # Reshape to spatial for FPN
-        x_spatial = self.layer_norm(x.reshape(-1, H, W, x.shape[-1]).permute(0, 3, 1, 2))
-        return {"last_hidden_state": x, "spatial": x_spatial}
+            x = layer(x)
+        # Back to sequence
+        x = x.view(B, H * W, C)
+        return {"last_hidden_state": x}
 
 
-# ── FPN Neck ────────────────────────────────────────────────────
+# ── FPN Layer ───────────────────────────────────────────────────
 class Sam3FPNLayer(nn.Module):
-    """Single FPN layer: project + upsample to target scale."""
-    def __init__(self, in_channels: int = 1024, out_channels: int = 256,
-                 scale_factor: int = 1):
+    """Keys: scale_layers, proj1, proj2."""
+    def __init__(self, in_channels, fpn_dim, scale_factor):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 1)
-        if scale_factor > 1:
-            self.upsample = nn.ConvTranspose2d(out_channels, out_channels, 2,
-                                                stride=2) if scale_factor <= 2 else None
-            # For larger scale factors, use sequential upsampling
-            if scale_factor > 2:
-                layers = []
-                for _ in range(int(math.log2(scale_factor))):
-                    layers.extend([
-                        nn.ConvTranspose2d(out_channels, out_channels, 2, stride=2),
-                    ])
-                self.upsample = nn.Sequential(*layers)
+        self.scale_factor = scale_factor
+        self.scale_layers = nn.ModuleList()
+        if scale_factor == 4.0:
+            self.scale_layers.append(
+                nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2))
+            self.scale_layers.append(nn.GELU())
+            self.scale_layers.append(
+                nn.ConvTranspose2d(in_channels // 2, in_channels // 4, kernel_size=2, stride=2))
+            intermediate = in_channels // 4
+        elif scale_factor == 2.0:
+            self.scale_layers.append(
+                nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2))
+            intermediate = in_channels // 2
+        elif scale_factor == 1.0:
+            intermediate = in_channels
+        elif scale_factor == 0.5:
+            self.scale_layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
+            intermediate = in_channels
         else:
-            self.upsample = None
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+            raise NotImplementedError(f"scale_factor={scale_factor}")
+        self.proj1 = nn.Conv2d(intermediate, fpn_dim, kernel_size=1)
+        self.proj2 = nn.Conv2d(fpn_dim, fpn_dim, kernel_size=3, padding=1)
 
     def forward(self, x):
-        x = self.conv1(x)
-        if self.upsample is not None:
-            x = self.upsample(x)
-        x = self.conv2(F.gelu(x))
+        x = x.to(self.proj1.weight.dtype)
+        for layer in self.scale_layers:
+            x = layer(x)
+        x = self.proj1(x)
+        x = self.proj2(x)
         return x
 
 
-import math
-
+# ── Vision Neck ─────────────────────────────────────────────────
 class Sam3VisionNeck(nn.Module):
-    """FPN Neck producing multi-scale features from ViT backbone output.
-    Outputs 4 feature maps at different scales:
-      [B, 256, 288, 288], [B, 256, 144, 144], [B, 256, 72, 72], [B, 256, 36, 36]
-    """
-    def __init__(self, in_channels: int = 1024, out_channels: int = 256,
-                 grid_size: int = 72):
+    """Keys: position_encoding (no trainable params), fpn_layers."""
+    def __init__(self, backbone_hidden_size=1024, fpn_hidden_size=256,
+                 scale_factors=None):
         super().__init__()
-        self.position_encoding = Sam3SinePositionEmbedding(out_channels)
-        # 4 FPN layers at different scales: 4x, 2x, 1x, 0.5x relative to grid
+        if scale_factors is None:
+            scale_factors = [4.0, 2.0, 1.0, 0.5]
+        self.position_encoding = Sam3SinePositionEmbedding(
+            num_pos_feats=fpn_hidden_size // 2, normalize=True)
         self.fpn_layers = nn.ModuleList([
-            Sam3FPNLayer(in_channels, out_channels, scale_factor=4),   # → 288
-            Sam3FPNLayer(in_channels, out_channels, scale_factor=2),   # → 144
-            Sam3FPNLayer(in_channels, out_channels, scale_factor=1),   # → 72
-            Sam3FPNLayer(in_channels, out_channels, scale_factor=1),   # → 36 (with pool)
+            Sam3FPNLayer(backbone_hidden_size, fpn_hidden_size, s)
+            for s in scale_factors
         ])
-        self.grid_size = grid_size
 
-    def forward(self, backbone_features):
-        """backbone_features: [B, C, H, W] from ViT spatial output."""
-        features = []
-        for i, fpn in enumerate(self.fpn_layers):
-            feat = fpn(backbone_features)
-            if i == 3:
-                # Downsample for smallest scale
-                feat = F.avg_pool2d(feat, 2)
-            features.append(feat)
-        return tuple(features)
+    def forward(self, hidden_states):
+        """hidden_states: [B, C, H, W] spatial from backbone."""
+        fpn_hidden_states = ()
+        fpn_position_encoding = ()
+        for fpn in self.fpn_layers:
+            out = fpn(hidden_states)
+            fpn_hidden_states += (out,)
+            pos = self.position_encoding(out.shape, out.device, out.dtype)
+            fpn_position_encoding += (pos,)
+        return fpn_hidden_states, fpn_position_encoding
 
 
-# ── Top-level Vision Encoder ────────────────────────────────────
+# ── Full Vision Encoder ─────────────────────────────────────────
 class Sam3VisionModel(nn.Module):
-    """Full vision encoder: ViT backbone + FPN Neck."""
-    def __init__(self, hidden: int = 1024, num_heads: int = 16,
-                 intermediate: int = 4096, num_layers: int = 32,
-                 image_size: int = 1008, patch_size: int = 14,
-                 out_channels: int = 256, window_size: int = 8):
+    """Keys: backbone (Sam3ViTModel), neck (Sam3VisionNeck)."""
+    def __init__(self, hidden_size=1024, num_heads=16, intermediate_size=4096,
+                 num_layers=32, image_size=1008, patch_size=14,
+                 pretrain_image_size=1008, fpn_hidden_size=256,
+                 window_size=8, global_attn_indexes=None,
+                 scale_factors=None, layer_norm_eps=1e-6,
+                 dropout=0.0, rope_theta=10000.0):
         super().__init__()
-        self.backbone = Sam3ViTModel(hidden, num_heads, intermediate, num_layers,
-                                      image_size, patch_size, window_size)
-        grid = image_size // patch_size
-        self.neck = Sam3VisionNeck(hidden, out_channels, grid)
+        self.backbone = Sam3ViTModel(
+            hidden_size, num_heads, intermediate_size, num_layers,
+            image_size, patch_size, pretrain_image_size, window_size,
+            global_attn_indexes, layer_norm_eps, dropout, rope_theta)
+        self.neck = Sam3VisionNeck(hidden_size, fpn_hidden_size, scale_factors)
+        self.patch_size = patch_size
 
     def forward(self, pixel_values):
         backbone_out = self.backbone(pixel_values)
-        multi_scale = self.neck(backbone_out["spatial"])
+        last_hidden = backbone_out["last_hidden_state"]  # [B, N, C]
+        B = last_hidden.shape[0]
+        H = pixel_values.shape[-2] // self.patch_size
+        W = pixel_values.shape[-1] // self.patch_size
+        spatial = last_hidden.view(B, H, W, -1).permute(0, 3, 1, 2)  # [B, C, H, W]
+        fpn_hidden, fpn_pos = self.neck(spatial)
         return {
-            "last_hidden_state": backbone_out["last_hidden_state"],
-            "multi_scale_features": multi_scale,
+            "last_hidden_state": last_hidden,
+            "fpn_hidden_states": fpn_hidden,
+            "fpn_position_encoding": fpn_pos,
         }
