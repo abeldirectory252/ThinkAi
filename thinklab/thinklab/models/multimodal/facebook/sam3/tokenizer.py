@@ -4,10 +4,10 @@ SAM3 Tokenizer — CLIP BPE tokenizer wrapper.
 SAM3 uses CLIP text encoding (vocab=49408, max_len=32).
 NO chat template — this is a segmentation model, not conversational.
 Uses simple text prompts like "segment the red object".
-
+SAM3 Tokenizer — CLIP BPE tokenizer.
 thinklab\thinklab\models\multimodal\facebook\sam3\tokenizer.py
 """
-"""SAM3 Tokenizer — CLIP BPE tokenizer."""
+
 import json
 import re
 from pathlib import Path

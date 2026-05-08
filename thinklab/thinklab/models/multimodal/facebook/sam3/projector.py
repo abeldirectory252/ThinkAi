@@ -1,11 +1,11 @@
 """
 SAM3 Text Projection: projects CLIP text features to decoder dimension.
 CLIP text_encoder outputs [B, seq, 1024] → projected to [B, seq, 256] for decoder.
-
+SAM3 Text Projection — kept for compatibility, but actual projection lives in model.py.
 thinklab\thinklab\models\multimodal\facebook\sam3\projector.py
 """
         
-"""SAM3 Text Projection — kept for compatibility, but actual projection lives in model.py."""
+
 import torch.nn as nn
 
 

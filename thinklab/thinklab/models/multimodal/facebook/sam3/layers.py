@@ -1,8 +1,10 @@
 """
 SAM3 primitive layers — key names match HuggingFace exactly.
 thinklab\thinklab\models\multimodal\facebook\sam3\layers.py
+
+SAM3 primitive layers — matches HuggingFace exactly.
 """
-"""SAM3 primitive layers — matches HuggingFace exactly."""
+
 import math
 import torch
 import torch.nn as nn

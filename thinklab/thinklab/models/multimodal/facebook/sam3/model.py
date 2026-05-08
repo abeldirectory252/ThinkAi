@@ -7,8 +7,10 @@ Top-level keys (after stripping 'detector_model.' from checkpoint):
   text_projection.*
   geometry_encoder.*, detr_encoder.*, detr_decoder.*
   mask_decoder.*, dot_product_scoring.*
+
+  SAM3 — Segment Anything Model 3.
 """
-"""SAM3 — Segment Anything Model 3."""
+
 import logging
 import re
 from pathlib import Path

@@ -1,9 +1,10 @@
 """
 SAM3 Image Processor — 1008×1008 normalization + post-processing.
 Uses ImageNet mean/std (not SigLIP).
+SAM3 Image Processor — 1008×1008 with ImageNet normalization.
 thinklab\thinklab\models\multimodal\facebook\sam3\image_processor.py
 """
-"""SAM3 Image Processor — 1008×1008 with ImageNet normalization."""
+
 from typing import Union, Optional, List
 from pathlib import Path
 import numpy as np
