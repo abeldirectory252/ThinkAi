@@ -56,7 +56,10 @@ class Sam3ViTRotaryEmbedding(nn.Module):
 
     @torch.no_grad()
     def forward(self):
-        return self.rope_embeddings_cos, self.rope_embeddings_sin
+        # cos/sin are [seq_len, dim], unsqueeze to [1, 1, seq_len, dim] for broadcasting
+        # with q/k shapes of [B, num_heads, seq_len, head_dim]
+        return self.rope_embeddings_cos.unsqueeze(0).unsqueeze(0), \
+               self.rope_embeddings_sin.unsqueeze(0).unsqueeze(0)
 
 
 # ── ViT RoPE Attention ─────────────────────────────────────────
