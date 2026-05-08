@@ -109,7 +109,7 @@ class CLIPEncoder(nn.Module):
     def forward(self, x, attention_mask=None):
         seq_len = x.shape[1]
         causal = torch.triu(
-            torch.full((seq_len, seq_len), float("-inf"), device=x.device), diagonal=1)
+            torch.full((seq_len, seq_len), float("-inf"), device=x.device, dtype=x.dtype), diagonal=1)
         for layer in self.layers:
             x = layer(x, causal)
         return x
