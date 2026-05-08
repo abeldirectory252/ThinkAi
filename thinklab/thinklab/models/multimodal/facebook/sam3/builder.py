@@ -62,7 +62,7 @@ def _extract_config(config: dict) -> tuple[dict, dict, dict]:
     # From geometry encoder
     dc["geometry_layers"] = geo.get("num_layers", 3)
     # From mask decoder
-    dc["num_upsampling_stages"] = mask_dec.get("num_upsampling_stages", 2)
+    dc["num_upsampling_stages"] = mask_dec.get("num_upsampling_stages", 3)
 
     return vc, tc, dc
 
