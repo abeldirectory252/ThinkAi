@@ -5,7 +5,10 @@ Auto-registers with ThinkLab on import via REGISTRY_PATTERN.
 Usage:
     model = thinklab.load_llm("facebook/sam3", token="hf_xxx", device="auto")
     result = model.inference(prompt="segment the red object", image_path="photo.jpg")
+
+thinklab\thinklab\models\multimodal\facebook\sam3\builder.py
 """
+"""SAM3 builder — constructs and loads Segment Anything Model 3."""
 import logging
 from pathlib import Path
 import torch
@@ -18,65 +21,41 @@ REGISTRY_PATTERN = "sam3"
 
 
 def _extract_config(config: dict) -> tuple[dict, dict, dict]:
-    """Extract vision, text, and decoder configs from HF's nested config.json.
-
-    HF Sam3Config structure:
-        vision_config.backbone_config.*   → ViT parameters
-        vision_config.fpn_hidden_size     → FPN dimension
-        vision_config.scale_factors       → FPN scale factors
-        text_config.*                     → CLIP text encoder
-        detr_encoder_config.*             → DETR encoder
-        detr_decoder_config.*             → DETR decoder
-        geometry_encoder_config.*         → Geometry encoder
-        mask_decoder_config.*             → Mask decoder
-    """
-    # ── Vision config: flatten backbone_config into vc ──
     raw_vis = config.get("vision_config", {})
     backbone = raw_vis.get("backbone_config", {})
-    vc = {**backbone}  # Start with backbone params (hidden_size, num_layers, etc.)
-    # Add vision-level params
+    vc = {**backbone}
     if "fpn_hidden_size" in raw_vis:
         vc["fpn_hidden_size"] = raw_vis["fpn_hidden_size"]
     if "scale_factors" in raw_vis:
         vc["scale_factors"] = raw_vis["scale_factors"]
 
-    # ── Text config ──
     tc = config.get("text_config", {})
 
-    # ── Decoder configs: merge DETR encoder/decoder/geometry/mask into dc ──
     detr_enc = config.get("detr_encoder_config", {})
     detr_dec = config.get("detr_decoder_config", {})
     geo = config.get("geometry_encoder_config", {})
     mask_dec = config.get("mask_decoder_config", {})
 
-    dc = {}
-    # From DETR encoder
-    dc["hidden_size"] = detr_enc.get("hidden_size", 256)
-    dc["num_attention_heads"] = detr_enc.get("num_attention_heads", 8)
-    dc["intermediate_size"] = detr_enc.get("intermediate_size", 2048)
-    dc["encoder_layers"] = detr_enc.get("num_layers", 6)
-    dc["dropout"] = detr_enc.get("dropout", 0.0)
-    # From DETR decoder
-    dc["decoder_layers"] = detr_dec.get("num_layers", 6)
-    dc["num_queries"] = detr_dec.get("num_queries", 200)
-    # From geometry encoder
-    dc["geometry_layers"] = geo.get("num_layers", 3)
-    # From mask decoder
-    dc["num_upsampling_stages"] = mask_dec.get("num_upsampling_stages", 3)
-
+    dc = {
+        "hidden_size": detr_enc.get("hidden_size", 256),
+        "num_attention_heads": detr_enc.get("num_attention_heads", 8),
+        "intermediate_size": detr_enc.get("intermediate_size", 2048),
+        "encoder_layers": detr_enc.get("num_layers", 6),
+        "dropout": detr_enc.get("dropout", 0.0),
+        "decoder_layers": detr_dec.get("num_layers", 6),
+        "num_queries": detr_dec.get("num_queries", 200),
+        "geometry_layers": geo.get("num_layers", 3),
+        "num_upsampling_stages": mask_dec.get("num_upsampling_stages", 3),
+    }
     return vc, tc, dc
 
 
 def build_sam3(save_dir, config, dtype, device, max_memory_gb=None, **kw):
-    """Build and load the SAM3 model."""
     from .model import Sam3Model
 
     debug = kw.pop("debug", False)
-
-    # Extract nested HF config structure
     vc, tc, dc = _extract_config(config)
 
-    # Apply defaults for any missing values
     vc.setdefault("hidden_size", 1024)
     vc.setdefault("num_attention_heads", 16)
     vc.setdefault("intermediate_size", 4736)
@@ -93,7 +72,7 @@ def build_sam3(save_dir, config, dtype, device, max_memory_gb=None, **kw):
     tc.setdefault("num_attention_heads", 16)
     tc.setdefault("num_hidden_layers", 24)
     tc.setdefault("intermediate_size", 4096)
-    tc.setdefault("max_position_embeddings", 32)  # SAM3 uses 32, NOT 77
+    tc.setdefault("max_position_embeddings", 32)
     tc.setdefault("projection_dim", 512)
 
     dc.setdefault("hidden_size", 256)
@@ -109,7 +88,6 @@ def build_sam3(save_dir, config, dtype, device, max_memory_gb=None, **kw):
     model.load_weights(Path(save_dir), debug=debug)
     model = model.to(dtype)
 
-    # Device placement
     if device == "auto":
         dev = model.smart_device()
     else:
@@ -121,7 +99,6 @@ def build_sam3(save_dir, config, dtype, device, max_memory_gb=None, **kw):
         budget = max_memory_gb * 1024 if max_memory_gb else free
         if budget < needed * 1.2:
             logger.info("Offloading SAM3 layers (%.0f MB free, %.0f needed)", free, needed)
-            # Keep vision encoder + text encoder on GPU, offload DETR layers
             model.vision_encoder.to(dev)
             model.text_encoder.to(dev)
             model.text_projection.to(dev)
