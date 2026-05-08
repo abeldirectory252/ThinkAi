@@ -56,7 +56,7 @@ class Sam3ImageProcessor:
             image = Image.fromarray(image).convert("RGB")
 
         orig_w, orig_h = image.size
-        image = image.resize((self.image_size, self.image_size), Image.BICUBIC)
+        image = image.resize((self.image_size, self.image_size), Image.BILINEAR)
         arr = np.array(image).astype(np.float32) / 255.0
         tensor = torch.from_numpy(arr).permute(2, 0, 1)
         tensor = (tensor - self.mean) / self.std

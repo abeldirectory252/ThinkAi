@@ -41,7 +41,7 @@ def build_sam3(save_dir, config, dtype, device, max_memory_gb=None, **kw):
     tc.setdefault("num_attention_heads", 16)
     tc.setdefault("num_hidden_layers", 24)
     tc.setdefault("intermediate_size", 4096)
-    tc.setdefault("max_position_embeddings", 32)
+    tc.setdefault("max_position_embeddings", 77)
 
     dc.setdefault("hidden_size", 256)
     dc.setdefault("num_attention_heads", 8)
