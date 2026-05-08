@@ -29,10 +29,11 @@ def build_sam3(save_dir, config, dtype, device, max_memory_gb=None, **kw):
     # Default configs for SAM3 if not provided
     vc.setdefault("hidden_size", 1024)
     vc.setdefault("num_attention_heads", 16)
-    vc.setdefault("intermediate_size", 4096)
+    vc.setdefault("intermediate_size", 4736)
     vc.setdefault("num_hidden_layers", 32)
     vc.setdefault("image_size", 1008)
     vc.setdefault("patch_size", 14)
+    vc.setdefault("pretrain_image_size", 336)
     vc.setdefault("window_size", 8)
 
     tc.setdefault("vocab_size", 49408)
