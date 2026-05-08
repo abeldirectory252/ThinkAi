@@ -296,11 +296,11 @@ class Sam3Model(BaseModel):
 
         text_mask = attention_mask.bool() if attention_mask is not None else None
 
-        # ── DETR encoder (use finest FPN level) ──
+        # ── DETR encoder (use 1× FPN level: 72×72 = 5184 tokens) ──
         enc_out = self.detr_encoder(
-            vision_features=[fpn_hidden[-1]],
+            vision_features=[fpn_hidden[-2]],
             text_features=text_proj,
-            vision_pos_embeds=[fpn_pos[-1]],
+            vision_pos_embeds=[fpn_pos[-2]],
             text_mask=text_mask)
 
         # ── DETR decoder ──
