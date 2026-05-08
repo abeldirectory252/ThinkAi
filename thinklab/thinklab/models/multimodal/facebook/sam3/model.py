@@ -75,7 +75,9 @@ class CLIPMLP(nn.Module):
         self.fc2 = nn.Linear(intermediate_size, hidden_size)
 
     def forward(self, x):
-        return self.fc2(F.gelu(self.fc1(x), approximate="tanh"))
+        # CLIP uses quick_gelu: h * sigmoid(1.702 * h), NOT standard gelu
+        h = self.fc1(x)
+        return self.fc2(h * torch.sigmoid(1.702 * h))
 
 
 class CLIPEncoderLayer(nn.Module):

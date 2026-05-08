@@ -135,6 +135,19 @@ class Sam3Tokenizer:
         return self.encode(text)
 
     def get_attention_mask(self, ids: List[int]) -> List[int]:
-        """Generate attention mask (1 for real tokens, 0 for padding)."""
-        return [1 if i != self.PAD_ID or idx == 0 else 0
-                for idx, i in enumerate(ids)]
+        """Generate attention mask (1 for real tokens including EOS, 0 for padding).
+
+        Since PAD_ID == EOS_ID, we mark everything up to and including
+        the first EOS after BOS as valid, rest as padding.
+        """
+        mask = []
+        found_eos = False
+        for idx, token_id in enumerate(ids):
+            if not found_eos:
+                mask.append(1)
+                # Mark found after first EOS that isn't the BOS position
+                if token_id == self.EOS_ID and idx > 0:
+                    found_eos = True
+            else:
+                mask.append(0)
+        return mask
