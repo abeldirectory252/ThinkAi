@@ -232,7 +232,7 @@ class Sam3Model(BaseModel):
         # ── Mask decoder ──
         self.mask_decoder = Sam3MaskDecoder(
             hidden=decoder_hidden, num_heads=decoder_heads,
-            num_upsampling_stages=dc.get("num_upsampling_stages", 2),
+            num_upsampling_stages=dc.get("num_upsampling_stages", 3),
             drop=decoder_drop)
 
         # ── Dot-product scoring ──

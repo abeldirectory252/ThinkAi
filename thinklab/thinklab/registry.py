@@ -205,10 +205,11 @@ class ThinkLabModel:
         self.isWebSocEnable = isWebSocEnable
         self.inference_config = inference_config
 
-        # Vision config
+        # Vision config (handle HF nested structure: vision_config.backbone_config.*)
         vis_cfg = config.get("vision_config", {})
-        self.image_size = vis_cfg.get("image_size", 224)
-        self.patch_size = vis_cfg.get("patch_size", 14)
+        backbone_cfg = vis_cfg.get("backbone_config", {})
+        self.image_size = vis_cfg.get("image_size", backbone_cfg.get("image_size", 224))
+        self.patch_size = vis_cfg.get("patch_size", backbone_cfg.get("patch_size", 14))
 
         # Load model-specific tokenizer and image processor
         # Each model package (e.g. google/medgemma-4b-it/) has its own

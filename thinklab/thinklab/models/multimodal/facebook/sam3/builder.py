@@ -103,7 +103,7 @@ def build_sam3(save_dir, config, dtype, device, max_memory_gb=None, **kw):
     dc.setdefault("decoder_layers", 6)
     dc.setdefault("geometry_layers", 3)
     dc.setdefault("num_queries", 200)
-    dc.setdefault("num_upsampling_stages", 2)
+    dc.setdefault("num_upsampling_stages", 3)
 
     model = Sam3Model(vision_cfg=vc, text_cfg=tc, decoder_cfg=dc, dtype=dtype)
     model.load_weights(Path(save_dir), debug=debug)
