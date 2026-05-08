@@ -378,7 +378,7 @@ class Sam3MaskDecoder(nn.Module):
     """Keys: pixel_decoder, mask_embedder, instance_projection,
     semantic_projection, prompt_cross_attn, prompt_cross_attn_norm,
     prompt_cross_attn_dropout."""
-    def __init__(self, hidden=256, num_heads=8, num_upsampling_stages=3,
+    def __init__(self, hidden=256, num_heads=8, num_upsampling_stages=2,
                  drop=0.0):
         super().__init__()
         self.pixel_decoder = Sam3PixelDecoder(hidden, num_upsampling_stages)

@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # ── CLIP Text Encoder (matching CLIPTextModelWithProjection keys) ──
 class CLIPTextEmbeddings(nn.Module):
     """Keys: token_embedding, position_embedding."""
-    def __init__(self, vocab_size=49408, hidden_size=1024, max_position=77):
+    def __init__(self, vocab_size=49408, hidden_size=1024, max_position=32):
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, hidden_size)
         self.position_embedding = nn.Embedding(max_position, hidden_size)
@@ -138,7 +138,7 @@ class CLIPTextModel(nn.Module):
 class CLIPTextModelWithProjection(nn.Module):
     """Keys: text_model, text_projection (bias=False)."""
     def __init__(self, vocab_size=49408, hidden_size=1024, num_heads=16,
-                 num_layers=24, intermediate_size=4096, max_position=77,
+                 num_layers=24, intermediate_size=4096, max_position=32,
                  projection_dim=512):
         super().__init__()
         self.text_model = CLIPTextModel(vocab_size, hidden_size, num_heads,
@@ -202,7 +202,7 @@ class Sam3Model(BaseModel):
             num_heads=tc.get("num_attention_heads", 16),
             num_layers=tc.get("num_hidden_layers", 24),
             intermediate_size=tc.get("intermediate_size", 4096),
-            max_position=tc.get("max_position_embeddings", 77),
+            max_position=tc.get("max_position_embeddings", 32),
             projection_dim=tc.get("projection_dim", 512),
         )
 
@@ -232,7 +232,7 @@ class Sam3Model(BaseModel):
         # ── Mask decoder ──
         self.mask_decoder = Sam3MaskDecoder(
             hidden=decoder_hidden, num_heads=decoder_heads,
-            num_upsampling_stages=dc.get("num_upsampling_stages", 3),
+            num_upsampling_stages=dc.get("num_upsampling_stages", 2),
             drop=decoder_drop)
 
         # ── Dot-product scoring ──
@@ -285,8 +285,9 @@ class Sam3Model(BaseModel):
                 text_embeds=None, boxes=None, original_sizes=None):
         # ── Vision ──
         vis_out = self.vision_encoder(pixel_values)
-        fpn_hidden = vis_out["fpn_hidden_states"]
-        fpn_pos = vis_out["fpn_position_encoding"]
+        # Match HF: drop the coarsest FPN level (level 3, 0.5× scale)
+        fpn_hidden = vis_out["fpn_hidden_states"][:-1]   # levels 0,1,2
+        fpn_pos = vis_out["fpn_position_encoding"][:-1]   # levels 0,1,2
 
         # ── Text ──
         if text_embeds is None:
@@ -298,11 +299,11 @@ class Sam3Model(BaseModel):
 
         text_mask = attention_mask.bool() if attention_mask is not None else None
 
-        # ── DETR encoder (use 1× FPN level: 72×72 = 5184 tokens) ──
+        # ── DETR encoder (use finest remaining FPN level: level 2, 72×72) ──
         enc_out = self.detr_encoder(
-            vision_features=[fpn_hidden[-2]],
+            vision_features=[fpn_hidden[-1]],
             text_features=text_proj,
-            vision_pos_embeds=[fpn_pos[-2]],
+            vision_pos_embeds=[fpn_pos[-1]],
             text_mask=text_mask)
 
         # ── DETR decoder ──
@@ -331,10 +332,10 @@ class Sam3Model(BaseModel):
         decoder_hs = inter_hs[-1]
         presence_logits = dec_out["presence_logits"][-1]
 
-        # ── Mask decoder ──
+        # ── Mask decoder (uses all FPN levels 0,1,2) ──
         mask_out = self.mask_decoder(
             decoder_queries=decoder_hs,
-            backbone_features=list(fpn_hidden[:-1]),
+            backbone_features=list(fpn_hidden),
             encoder_hidden_states=enc_out["last_hidden_state"],
             prompt_features=text_proj,
             prompt_mask=text_mask)
