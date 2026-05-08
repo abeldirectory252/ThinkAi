@@ -110,10 +110,28 @@ class CLIPEncoder(nn.Module):
 
     def forward(self, x, attention_mask=None):
         seq_len = x.shape[1]
+        # Causal mask: upper triangular -inf
         causal = torch.triu(
             torch.full((seq_len, seq_len), float("-inf"), device=x.device, dtype=x.dtype), diagonal=1)
+
+        # Combine with padding mask if provided (HF CLIP does this)
+        # attention_mask: [B, seq_len] with 1=valid, 0=padding
+        if attention_mask is not None:
+            # Build padding mask: 0 for valid, large negative for padding
+            # Using masked_fill to avoid 0 * -inf = NaN (IEEE 754)
+            padding_mask = torch.zeros(
+                attention_mask.shape[0], 1, 1, seq_len,
+                device=x.device, dtype=x.dtype)
+            padding_mask.masked_fill_(
+                ~attention_mask.bool().unsqueeze(1).unsqueeze(2),
+                torch.finfo(x.dtype).min)
+            # Combine: causal [seq, seq] broadcasts with padding [B, 1, 1, seq]
+            combined_mask = causal.unsqueeze(0) + padding_mask  # [B, 1, seq, seq]
+        else:
+            combined_mask = causal
+
         for layer in self.layers:
-            x = layer(x, causal)
+            x = layer(x, combined_mask)
         return x
 
 
