@@ -6,9 +6,9 @@ Usage:
     model = thinklab.load_llm("facebook/sam3", token="hf_xxx", device="auto")
     result = model.inference(prompt="segment the red object", image_path="photo.jpg")
 
-thinklab\thinklab\models\multimodal\facebook\sam3\builder.py
+thinklab/thinklab/models/multimodal/facebook/sam3/builder.py
 """
-"""SAM3 builder — constructs and loads Segment Anything Model 3."""
+
 import logging
 from pathlib import Path
 import torch
