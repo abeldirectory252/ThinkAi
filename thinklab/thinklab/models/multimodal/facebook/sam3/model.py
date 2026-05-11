@@ -58,8 +58,9 @@ class CLIPAttention(nn.Module):
         q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
-        # Use SDPA for memory-efficient attention
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        # Use SDPA with is_causal=True (handles causal masking internally)
+        # attn_mask should be None or a padding mask [B, 1, 1, seq]
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=True)
         out = out.transpose(1, 2).contiguous().view(B, N, -1)
         return self.out_proj(out)
 
@@ -103,28 +104,20 @@ class CLIPEncoder(nn.Module):
         ])
 
     def forward(self, x, attention_mask=None):
+        # Convert padding mask to additive format for SDPA
+        # attention_mask: [B, seq] where 1=valid, 0=pad
+        # SDPA expects: [B, 1, 1, seq] with -inf for masked positions
         B, seq_len, _ = x.shape
-        dtype = x.dtype
-        device = x.device
-        min_val = torch.finfo(dtype).min
-
-        # Causal mask: [seq, seq] with -inf above diagonal
-        causal = torch.full((seq_len, seq_len), min_val, device=device, dtype=dtype)
-        causal = torch.triu(causal, diagonal=1)
-        # → [1, 1, seq, seq] for broadcasting
-        causal = causal.unsqueeze(0).unsqueeze(0)
-
+        
         if attention_mask is not None:
-            # attention_mask: [B, seq], 1=valid, 0=pad
-            # Build [B, 1, 1, seq] additive mask
-            expanded = attention_mask[:, None, None, :].to(dtype)
-            expanded = (1.0 - expanded) * min_val
-            combined = causal + expanded   # [B, 1, seq, seq]
+            # Convert to additive mask: 0 for valid, -inf for masked
+            attn_mask = attention_mask[:, None, None, :].to(x.dtype)
+            attn_mask = (1.0 - attn_mask) * torch.finfo(x.dtype).min
         else:
-            combined = causal
+            attn_mask = None
 
         for layer in self.layers:
-            x = layer(x, combined)
+            x = layer(x, attn_mask)
         return x
 
 
@@ -187,9 +180,9 @@ class Sam3Model(BaseModel):
             num_layers=vc.get("num_hidden_layers", 32),
             image_size=vc.get("image_size", 1008),
             patch_size=vc.get("patch_size", 14),
-            pretrain_image_size=vc.get("pretrain_image_size", 336), 
+            pretrain_image_size=vc.get("pretrain_image_size", 336),
             fpn_hidden_size=decoder_hidden,
-            window_size=vc.get("window_size", 24),  # FIXED: was 8
+            window_size=vc.get("window_size", 24),
             global_attn_indexes=vc.get("global_attn_indexes", [7, 15, 23, 31]),
             scale_factors=vc.get("scale_factors", [4.0, 2.0, 1.0, 0.5]),
             layer_norm_eps=vc.get("layer_norm_eps", 1e-6),
