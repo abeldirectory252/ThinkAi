@@ -2,16 +2,10 @@
 SAM3 Vision Encoder — ViT backbone (RoPE) + FPN Neck.
 All key names match HuggingFace exactly.
 
-Fixes vs original:
-  1. Sam3ViTRotaryEmbedding.forward() returns raw [seq, dim] tensors (no unsqueeze).
-  2. apply_rotary_pos_emb_2d slices cos/sin to actual seq_len before broadcasting.
-  3. Sam3ViTModel.__init__ stores self.patch_size.
-  4. Sam3ViTModel.forward reshapes THEN layer_norms (matching HF order).
-  5. Sam3ViTLayer stores H/W before window_partition for correct unpartition.
-
-thinklab/thinklab/models/multimodal/facebook/sam3/vision_encoder.py
+vision_encoder.py
+SAM3 Vision Encoder — ViT (RoPE) + FPN Neck.
 """
-"""SAM3 Vision Encoder — ViT (RoPE) + FPN Neck."""
+
 import math
 import torch
 import torch.nn as nn
@@ -171,7 +165,7 @@ class Sam3ViTEmbeddings(nn.Module):
 class Sam3ViTLayer(nn.Module):
     def __init__(self, hidden_size=1024, num_heads=16, intermediate_size=4096,
                  image_size=1008, patch_size=14, window_size=0,
-                 global_window_size=8, layer_norm_eps=1e-6,
+                 global_window_size=24, layer_norm_eps=1e-6,
                  dropout=0.0, rope_theta=10000.0):
         super().__init__()
         ims = image_size if isinstance(image_size, (list, tuple)) else (image_size, image_size)
@@ -194,31 +188,39 @@ class Sam3ViTLayer(nn.Module):
     def forward(self, hidden_states):
         residual = hidden_states
         hidden_states = self.layer_norm1(hidden_states)
+        
+        # Store original dimensions for window unpartition
+        H_orig, W_orig = hidden_states.shape[1], hidden_states.shape[2]
+        
         if self.window_size > 0:
-            H, W = hidden_states.shape[1], hidden_states.shape[2]
             hidden_states, pad_hw = window_partition(hidden_states, self.window_size)
+        
         pos = self.rotary_emb()
         hidden_states, _ = self.attention(hidden_states, pos)
+        
         if self.window_size > 0:
             hidden_states = window_unpartition(
-                hidden_states, self.window_size, pad_hw, (H, W))
+                hidden_states, self.window_size, pad_hw, (H_orig, W_orig))
+        
         hidden_states = residual + hidden_states
+        
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + self.dropout(hidden_states)
+        
         return hidden_states
 
 
 class Sam3ViTModel(nn.Module):
     def __init__(self, hidden_size=1024, num_heads=16, intermediate_size=4096,
                  num_layers=32, image_size=1008, patch_size=14,
-                 pretrain_image_size=1008, window_size=8,
+                 pretrain_image_size=1008, window_size=24,
                  global_attn_indexes=None, layer_norm_eps=1e-6,
                  dropout=0.0, rope_theta=10000.0):
         super().__init__()
         if global_attn_indexes is None:
-            global_attn_indexes = []
+            global_attn_indexes = [7, 15, 23, 31]
         self.patch_size = patch_size if isinstance(patch_size, int) else patch_size[0]
         self.embeddings = Sam3ViTEmbeddings(
             hidden_size, patch_size, pretrain_image_size, dropout=dropout)
@@ -314,7 +316,7 @@ class Sam3VisionModel(nn.Module):
     def __init__(self, hidden_size=1024, num_heads=16, intermediate_size=4096,
                  num_layers=32, image_size=1008, patch_size=14,
                  pretrain_image_size=1008, fpn_hidden_size=256,
-                 window_size=8, global_attn_indexes=None,
+                 window_size=24, global_attn_indexes=None,
                  scale_factors=None, layer_norm_eps=1e-6,
                  dropout=0.0, rope_theta=10000.0):
         super().__init__()
