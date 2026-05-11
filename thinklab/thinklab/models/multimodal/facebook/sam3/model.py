@@ -58,9 +58,9 @@ class CLIPAttention(nn.Module):
         q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
-        # Use SDPA with is_causal=True (handles causal masking internally)
-        # attn_mask should be None or a padding mask [B, 1, 1, seq]
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=True)
+        # SDPA with causal mask passed as attn_mask (NOT is_causal=True)
+        # attn_mask is [seq, seq] additive causal mask from CLIPEncoder
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         out = out.transpose(1, 2).contiguous().view(B, N, -1)
         return self.out_proj(out)
 
@@ -70,11 +70,11 @@ class CLIPMLP(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(hidden_size, intermediate_size)
         self.fc2 = nn.Linear(intermediate_size, hidden_size)
+        self.act = nn.GELU()
 
     def forward(self, x):
-        # quick_gelu
-        h = self.fc1(x)
-        return self.fc2(h * torch.sigmoid(1.702 * h))
+        # Standard GELU (matching HF reference, NOT quick_gelu)
+        return self.fc2(self.act(self.fc1(x)))
 
 
 class CLIPEncoderLayer(nn.Module):
@@ -96,25 +96,25 @@ class CLIPEncoderLayer(nn.Module):
 
 
 class CLIPEncoder(nn.Module):
-    def __init__(self, hidden_size, num_heads, num_layers, intermediate_size):
+    def __init__(self, hidden_size, num_heads, num_layers, intermediate_size,
+                 max_position=32):
         super().__init__()
         self.layers = nn.ModuleList([
             CLIPEncoderLayer(hidden_size, num_heads, intermediate_size)
             for _ in range(num_layers)
         ])
+        # Build causal mask [seq, seq] — matching HF reference TextTransformer
+        # The text encoder uses ONLY causal masking, NOT padding masking
+        causal = torch.empty(max_position, max_position)
+        causal.fill_(float("-inf"))
+        causal.triu_(1)  # zero out the lower diagonal
+        self.register_buffer("causal_mask", causal, persistent=False)
 
     def forward(self, x, attention_mask=None):
-        # Convert padding mask to additive format for SDPA
-        # attention_mask: [B, seq] where 1=valid, 0=pad
-        # SDPA expects: [B, 1, 1, seq] with -inf for masked positions
+        # HF reference: only causal mask is used in text encoder attention
+        # Padding mask is NOT applied here (used downstream in DETR)
         B, seq_len, _ = x.shape
-        
-        if attention_mask is not None:
-            # Convert to additive mask: 0 for valid, -inf for masked
-            attn_mask = attention_mask[:, None, None, :].to(x.dtype)
-            attn_mask = (1.0 - attn_mask) * torch.finfo(x.dtype).min
-        else:
-            attn_mask = None
+        attn_mask = self.causal_mask[:seq_len, :seq_len]
 
         for layer in self.layers:
             x = layer(x, attn_mask)
@@ -126,7 +126,8 @@ class CLIPTextModel(nn.Module):
                  intermediate_size, max_position):
         super().__init__()
         self.embeddings = CLIPTextEmbeddings(vocab_size, hidden_size, max_position)
-        self.encoder = CLIPEncoder(hidden_size, num_heads, num_layers, intermediate_size)
+        self.encoder = CLIPEncoder(hidden_size, num_heads, num_layers, intermediate_size,
+                                    max_position=max_position)
         self.final_layer_norm = nn.LayerNorm(hidden_size)
 
     def forward(self, input_ids, attention_mask=None):
