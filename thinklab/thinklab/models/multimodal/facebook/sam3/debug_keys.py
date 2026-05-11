@@ -19,7 +19,14 @@ def diagnose_weight_keys(model, checkpoint_path, prefix_strip="detector_model.")
             continue
         ckpt_keys[clean] = v
     
-    model_keys = model.state_dict()
+    # Handle wrapper objects (ThinkLabModel, etc.)
+    raw = model
+    for attr in ['state_dict', 'model', 'module']:
+        if hasattr(raw, 'state_dict') and callable(raw.state_dict):
+            break
+        if hasattr(raw, attr):
+            raw = getattr(raw, attr)
+    model_keys = raw.state_dict()
     
     matched = []
     shape_mismatch = []
