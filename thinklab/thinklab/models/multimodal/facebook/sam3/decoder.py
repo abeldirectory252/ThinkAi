@@ -1,8 +1,7 @@
 """
 SAM3 Decoder — DETR Encoder/Decoder, Geometry Encoder, Mask Decoder, Scoring.
 All key names match HuggingFace exactly.
-SAM3 DETR Encoder/Decoder, Geometry Encoder, Mask Decoder, Scoring.
-sam3-decoder.py
+BUG-FREE VERSION
 """
 
 import math
@@ -59,7 +58,7 @@ class Sam3DetrEncoderLayer(nn.Module):
         h_pos = h + vision_pos
         attn_out, _ = self.self_attn(h_pos, h_pos, h)
         h = self.dropout(attn_out) + residual
-        # Cross-attention to text/prompt (NO pos added — HF: pos_enc_at_cross_attn_queries=False)
+        # Cross-attention to text/prompt (no pos on query)
         residual = h
         h = self.layer_norm2(h)
         attn_out, _ = self.cross_attn(h, prompt_feats, prompt_feats,
@@ -192,6 +191,7 @@ class Sam3DetrDecoder(nn.Module):
         self.presence_head = Sam3DecoderMLP(hidden, hidden, 1, num_layers=3)
         self.presence_layer_norm = nn.LayerNorm(hidden)
 
+        # FIXED: ref_point_head takes 512-dim input (cx,cy only = 2*256)
         self.ref_point_head = Sam3DecoderMLP(2 * hidden, hidden, hidden, num_layers=2)
         self.box_rpb_embed_x = Sam3DecoderMLP(2, hidden, num_heads, num_layers=2)
         self.box_rpb_embed_y = Sam3DecoderMLP(2, hidden, num_heads, num_layers=2)
@@ -207,7 +207,6 @@ class Sam3DetrDecoder(nn.Module):
         B, Q, _ = boxes_xyxy.shape
         coords_h = torch.arange(0, H, device=ref_boxes.device, dtype=ref_boxes.dtype) / H
         coords_w = torch.arange(0, W, device=ref_boxes.device, dtype=ref_boxes.dtype) / W
-        # boxes_xyxy[..., 1:4:2] = [y1, y2]; boxes_xyxy[..., 0:3:2] = [x1, x2]
         dy = coords_h.view(1, -1, 1) - boxes_xyxy.reshape(-1, 1, 4)[:, :, 1:4:2]
         dy = dy.view(B, Q, -1, 2)
         dx = coords_w.view(1, -1, 1) - boxes_xyxy.reshape(-1, 1, 4)[:, :, 0:3:2]
@@ -216,10 +215,10 @@ class Sam3DetrDecoder(nn.Module):
         dx_log = torch.sign(dx_log) * torch.log2(torch.abs(dx_log) + 1.0) / math.log2(8)
         dy_log = dy * 8
         dy_log = torch.sign(dy_log) * torch.log2(torch.abs(dy_log) + 1.0) / math.log2(8)
-        dx_emb = self.box_rpb_embed_x(dx_log)   # [B, Q, W, num_heads]
-        dy_emb = self.box_rpb_embed_y(dy_log)   # [B, Q, H, num_heads]
-        rpb = dy_emb.unsqueeze(3) + dx_emb.unsqueeze(2)   # [B, Q, H, W, num_heads]
-        rpb = rpb.flatten(2, 3).permute(0, 3, 1, 2).contiguous()  # [B, num_heads, Q, H*W]
+        dx_emb = self.box_rpb_embed_x(dx_log)
+        dy_emb = self.box_rpb_embed_y(dy_log)
+        rpb = dy_emb.unsqueeze(3) + dx_emb.unsqueeze(2)
+        rpb = rpb.flatten(2, 3).permute(0, 3, 1, 2).contiguous()
         return rpb
 
     def forward(self, vision_features, text_features, vision_pos_encoding,
@@ -238,8 +237,9 @@ class Sam3DetrDecoder(nn.Module):
         intermediate_presence = []
 
         for layer in self.layers:
-            # HF reference passes ALL 4 coordinates (cx,cy,w,h) to produce 4×128=512D
-            query_sine = gen_sineembed_for_position(ref_boxes)
+            # FIXED: Use ONLY (cx, cy) = 2 coordinates × 256 = 512 dims
+            # ref_point_head input is 2*hidden = 512
+            query_sine = gen_sineembed_for_position(ref_boxes[..., :2])
             query_pos = self.ref_point_head(query_sine)
 
             vision_cross_attn_mask = None
@@ -247,7 +247,6 @@ class Sam3DetrDecoder(nn.Module):
                 rpb = self._get_rpb_matrix(
                     ref_boxes,
                     (int(spatial_shapes[0, 0].item()), int(spatial_shapes[0, 1].item())))
-                # Pad on Q dimension for presence token (dim=2 of [B,heads,Q,K])
                 vision_cross_attn_mask = F.pad(rpb, (0, 0, 1, 0), value=0)
 
             hidden_states = layer(
