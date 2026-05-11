@@ -275,12 +275,36 @@ class Sam3Model(BaseModel):
             logger.warning("Unexpected %d keys: %s", len(unexpected), unexpected[:5])
 
     def forward(self, pixel_values, input_ids=None, attention_mask=None,
-                text_embeds=None, boxes=None, original_sizes=None):
+                text_embeds=None, boxes=None, original_sizes=None,
+                debug=False):
+        def _ts(name, t):
+            """Print tensor stats for debugging."""
+            if not debug or t is None:
+                return
+            if t.numel() == 0:
+                print(f"  {name}: EMPTY {t.shape}")
+                return
+            t_f = t.float()
+            print(f"  {name}: shape={list(t.shape)} "
+                  f"min={t_f.min().item():.4f} max={t_f.max().item():.4f} "
+                  f"mean={t_f.mean().item():.4f} std={t_f.std().item():.4f}")
+
+        if debug:
+            print(f"\n{'='*60}")
+            print(f"SAM3 FORWARD DEBUG — pixel_values: {list(pixel_values.shape)}")
+            print(f"{'='*60}")
+
         # Vision
         vis_out = self.vision_encoder(pixel_values)
         # Drop coarsest FPN level (index 3, 0.5×) — match HF
         fpn_hidden = vis_out["fpn_hidden_states"][:-1]
         fpn_pos = vis_out["fpn_position_encoding"][:-1]
+
+        if debug:
+            print("\n[1] VISION ENCODER:")
+            _ts("backbone_last_hidden", vis_out["last_hidden_state"])
+            for i, f in enumerate(fpn_hidden):
+                _ts(f"fpn_hidden[{i}]", f)
 
         # Text — match HF: text_features = text_projection(last_hidden_state)
         if text_embeds is None:
@@ -292,12 +316,24 @@ class Sam3Model(BaseModel):
 
         text_mask = attention_mask.bool() if attention_mask is not None else None
 
+        if debug:
+            print("\n[2] TEXT ENCODER:")
+            _ts("text_hidden", text_hidden)
+            _ts("text_features (projected)", text_features)
+            if text_mask is not None:
+                print(f"  text_mask: {text_mask.shape} valid_count={text_mask.sum().item()}")
+
         # DETR encoder — uses ONLY the finest remaining FPN level
         enc_out = self.detr_encoder(
             vision_features=[fpn_hidden[-1]],
             text_features=text_features,
             vision_pos_embeds=[fpn_pos[-1]],
             text_mask=text_mask)
+
+        if debug:
+            print("\n[3] DETR ENCODER:")
+            _ts("encoder_output", enc_out["last_hidden_state"])
+            print(f"  spatial_shapes: {enc_out['spatial_shapes'].tolist()}")
 
         # DETR decoder
         dec_out = self.detr_decoder(
@@ -309,6 +345,12 @@ class Sam3Model(BaseModel):
 
         inter_hs = dec_out["intermediate_hidden_states"]
         ref_boxes = dec_out["reference_boxes"]
+
+        if debug:
+            print("\n[4] DETR DECODER:")
+            _ts("inter_hs (all layers)", inter_hs)
+            _ts("ref_boxes", ref_boxes)
+            _ts("presence_logits (all layers)", dec_out["presence_logits"])
 
         # Box predictions across all layers
         all_box_offsets = self.detr_decoder.box_head(inter_hs)
@@ -326,6 +368,23 @@ class Sam3Model(BaseModel):
         decoder_hs = inter_hs[-1]
         presence_logits = dec_out["presence_logits"][-1]
 
+        if debug:
+            print("\n[5] SCORING (last layer):")
+            _ts("pred_logits (raw)", pred_logits)
+            scores_sig = pred_logits.sigmoid()
+            _ts("pred_logits (sigmoid)", scores_sig)
+            _ts("presence_logits (raw)", presence_logits)
+            pres_sig = presence_logits.sigmoid()
+            _ts("presence_logits (sigmoid)", pres_sig)
+            combined = scores_sig * pres_sig
+            _ts("combined_scores", combined)
+            n_above = (combined > 0.3).sum().item()
+            n_above_01 = (combined > 0.1).sum().item()
+            top5 = combined.flatten().topk(min(5, combined.numel())).values
+            print(f"  detections >0.3: {n_above}, >0.1: {n_above_01}")
+            print(f"  top-5 scores: {[f'{v:.4f}' for v in top5.tolist()]}")
+            _ts("pred_boxes", pred_boxes)
+
         # Mask decoder uses all 3 FPN levels (0,1,2)
         mask_out = self.mask_decoder(
             decoder_queries=decoder_hs,
@@ -333,6 +392,11 @@ class Sam3Model(BaseModel):
             encoder_hidden_states=enc_out["last_hidden_state"],
             prompt_features=text_features,
             prompt_mask=text_mask)
+
+        if debug:
+            print("\n[6] MASK DECODER:")
+            _ts("pred_masks", mask_out["pred_masks"])
+            print(f"{'='*60}\n")
 
         return {
             "pred_masks": mask_out["pred_masks"],

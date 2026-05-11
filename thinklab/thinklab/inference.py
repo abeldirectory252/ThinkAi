@@ -281,6 +281,7 @@ class InferenceEngine:
                 pixel_values=pixel_values,
                 input_ids=input_ids_t,
                 attention_mask=attn_mask,
+                debug=True,
             )
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
