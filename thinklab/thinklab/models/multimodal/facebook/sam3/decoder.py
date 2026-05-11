@@ -1,10 +1,10 @@
 """
 SAM3 Decoder — DETR Encoder/Decoder, Geometry Encoder, Mask Decoder, Scoring.
 All key names match HuggingFace exactly.
-
-thinklab\thinklab\models\multimodal\facebook\sam3\decoder.py
+SAM3 DETR Encoder/Decoder, Geometry Encoder, Mask Decoder, Scoring.
+sam3-decoder.py
 """
-"""SAM3 DETR Encoder/Decoder, Geometry Encoder, Mask Decoder, Scoring."""
+
 import math
 import torch
 import torch.nn as nn
@@ -58,10 +58,11 @@ class Sam3DetrEncoderLayer(nn.Module):
         h_pos = h + vision_pos
         attn_out, _ = self.self_attn(h_pos, h_pos, h)
         h = self.dropout(attn_out) + residual
-        # Cross-attention to text/prompt
+        # Cross-attention to text/prompt (add pos to query for spatial awareness)
         residual = h
         h = self.layer_norm2(h)
-        attn_out, _ = self.cross_attn(h, prompt_feats, prompt_feats,
+        h_pos = h + vision_pos  # pos_enc_at_cross_attn_queries=True
+        attn_out, _ = self.cross_attn(h_pos, prompt_feats, prompt_feats,
                                        attention_mask=prompt_cross_attn_mask)
         h = self.dropout(attn_out) + residual
         # MLP
@@ -80,6 +81,8 @@ class Sam3DetrEncoder(nn.Module):
             Sam3DetrEncoderLayer(hidden, num_heads, intermediate, drop)
             for _ in range(num_layers)
         ])
+        # Pooled text fusion: project mean-pooled text and add to image features
+        self.text_pooling_proj = nn.Linear(hidden, hidden)
 
     def forward(self, vision_features, text_features, vision_pos_embeds,
                 text_mask=None, spatial_shapes=None):
@@ -98,6 +101,16 @@ class Sam3DetrEncoder(nn.Module):
             hidden = vision_features
             pos = vision_pos_embeds
             spatial = spatial_shapes
+
+        # Fuse mean-pooled text into image features (reference: TransformerEncoderFusion)
+        if text_mask is not None:
+            is_valid = text_mask.to(text_features.dtype).unsqueeze(-1)  # [B, S, 1]
+            num_valid = is_valid.sum(dim=1).clamp(min=1.0)  # [B, 1]
+            pooled_text = (text_features * is_valid).sum(dim=1) / num_valid  # [B, C]
+        else:
+            pooled_text = text_features.mean(dim=1)  # [B, C]
+        pooled_text = self.text_pooling_proj(pooled_text).unsqueeze(1)  # [B, 1, C]
+        hidden = hidden + pooled_text  # broadcast add to all spatial positions
 
         cross_attn_mask = _build_padding_mask(text_mask, hidden.dtype, hidden.device)
 

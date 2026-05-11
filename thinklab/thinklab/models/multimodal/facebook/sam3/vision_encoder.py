@@ -243,9 +243,10 @@ class Sam3ViTModel(nn.Module):
         W = pixel_values.shape[-1] // self.patch_size
         C = x.shape[-1]
         x = x.view(B, H, W, C)
-        x = self.layer_norm(x)
         for layer in self.layers:
             x = layer(x)
+        # Final layer norm AFTER all transformer layers (standard ViT pattern)
+        x = self.layer_norm(x)
         x = x.view(B, H * W, C)
         return {"last_hidden_state": x}
 

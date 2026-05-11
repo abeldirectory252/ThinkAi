@@ -668,3 +668,160 @@ Sam3Model: Sam3Model (840,376,374 params)
     ├─      ↳ Flow: In: [1, 256] ➔ Out: [1, 256]
   └─ query_proj: Linear (65,792 params) | W: [256, 256]
   └─      ↳ Flow: In: [6, 1, 200, 256] ➔ Out: [6, 1, 200, 256]
+
+
+  Original image size: (640, 425) (W x H)
+
+--- HF Processor Output Keys ---
+  pixel_values: shape=torch.Size([1, 3, 1008, 1008]), dtype=torch.float32
+  original_sizes: shape=torch.Size([1, 2]), dtype=torch.int64
+  input_ids: shape=torch.Size([1, 32]), dtype=torch.int64
+  attention_mask: shape=torch.Size([1, 32]), dtype=torch.int64
+
+--- HF Tokenizer Details ---
+  Tokenizer class: CLIPTokenizer
+  Vocab size: 49408
+  BOS token: '<|startoftext|>' id=49406
+  EOS token: '<|endoftext|>' id=49407
+  PAD token: '<|endoftext|>' id=49407
+
+--- Token IDs for 'nose' ---
+  input_ids shape: torch.Size([1, 32])
+  input_ids: [49406, 8231, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407]
+  attention_mask: [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  Non-pad tokens: 3
+  Decoded: '<|startoftext|>nose <|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>'
+
+--- HF pixel_values stats ---
+  shape: torch.Size([1, 3, 1008, 1008])
+  dtype: torch.float32
+  min=-0.9922, max=1.0000
+  mean=0.0140, std=0.4408
+  channel means: ['-0.0412', '-0.0116', '0.0948']
+
+======================================================================
+PART 2: HF Model Internal Tensor Flow
+======================================================================
+
+--- Inputs passed to model.forward() ---
+  pixel_values: shape=torch.Size([1, 3, 1008, 1008]), dtype=torch.float32
+  input_ids: shape=torch.Size([1, 32]), dtype=torch.int64
+  attention_mask: shape=torch.Size([1, 32]), dtype=torch.int64
+
+--- After get_text_features ---
+  last_hidden_state: torch.Size([1, 32, 1024])
+  pooler_output (=text_projection output): torch.Size([1, 32, 256])
+  pooler_output min=-5.2127, max=4.5970
+  pooler_output[:, :5] sample: [0.06890208274126053, -0.03965961933135986, -0.03111271560192108, -0.02432403713464737, -0.08777505159378052]
+
+--- After vision_encoder ---
+  last_hidden_state: torch.Size([1, 5184, 1024])
+  FPN level 0: features=torch.Size([1, 256, 288, 288]), pos=torch.Size([1, 256, 288, 288])
+  FPN level 1: features=torch.Size([1, 256, 144, 144]), pos=torch.Size([1, 256, 144, 144])
+  FPN level 2: features=torch.Size([1, 256, 72, 72]), pos=torch.Size([1, 256, 72, 72])
+  FPN level 3: features=torch.Size([1, 256, 36, 36]), pos=torch.Size([1, 256, 36, 36])
+
+--- FPN levels used ---
+  DETR encoder uses: fpn_hidden[-1] = torch.Size([1, 256, 72, 72])
+  Mask decoder uses: fpn_hidden[:-1] = [torch.Size([1, 256, 288, 288]), torch.Size([1, 256, 144, 144])]
+
+--- text_mask ---
+  shape: torch.Size([1, 32])
+  values: [True, True, True, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False]
+
+--- Combined prompt (text only, no geometry) ---
+  combined_prompt: torch.Size([1, 32, 256])
+  combined_mask: torch.Size([1, 32])
+
+--- After DETR encoder ---
+  last_hidden_state: torch.Size([1, 5184, 256])
+  text_features: torch.Size([1, 32, 256])
+  spatial_shapes: tensor([[72, 72]], device='cuda:0')
+
+--- After DETR decoder ---
+  intermediate_hidden_states: torch.Size([6, 1, 200, 256])
+  reference_boxes: torch.Size([6, 1, 200, 4])
+  presence_logits: torch.Size([6, 1, 1])
+
+--- Full model output ---
+  pred_masks: torch.Size([1, 200, 288, 288])
+  pred_boxes: torch.Size([1, 200, 4])
+  pred_logits: torch.Size([1, 200])
+  presence_logits: torch.Size([1, 1])
+
+--- Score distribution ---
+  max score: 0.7081
+  scores > 0.3: 2
+  scores > 0.5: 1
+  Found 1 objects with threshold=0.5
+
+======================================================================
+PART 3: CRITICAL — get_text_features vs your text pipeline
+======================================================================
+CLIP text_encoder outputs:
+  last_hidden_state: torch.Size([1, 32, 1024])
+  text_embeds (CLIP projection): torch.Size([1, 512])
+  After model.text_projection: torch.Size([1, 32, 256])
+  This is what goes to DETR encoder as 'text_features'
+
+  YOUR impl: text_projection(last_hidden_state) -> same ✅
+
+======================================================================
+PART 4: Tokenization Comparison
+======================================================================
+
+  'nose':
+    input_ids[:3]: [49406, 8231, 49407]
+    attention_mask sum: 3
+    full ids: [49406, 8231, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407]
+    full mask: [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+  'Ear':
+    input_ids[:3]: [49406, 8373, 49407]
+    attention_mask sum: 3
+    full ids: [49406, 8373, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407]
+    full mask: [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+  'Eye':
+    input_ids[:3]: [49406, 3272, 49407]
+    attention_mask sum: 3
+    full ids: [49406, 3272, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407]
+    full mask: [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+  'cat eye':
+    input_ids[:4]: [49406, 2368, 3272, 49407]
+    attention_mask sum: 4
+    full ids: [49406, 2368, 3272, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407]
+    full mask: [1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+  'cat ear':
+    input_ids[:4]: [49406, 2368, 8373, 49407]
+    attention_mask sum: 4
+    full ids: [49406, 2368, 8373, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407]
+    full mask: [1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+  'cat nose':
+    input_ids[:4]: [49406, 2368, 8231, 49407]
+    attention_mask sum: 4
+    full ids: [49406, 2368, 8231, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407, 49407]
+    full mask: [1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+======================================================================
+PART 5: FPN Level Selection Analysis
+======================================================================
+
+HF uses fpn_hidden_states[:-1] for processing:
+  Total FPN levels: 4
+  Level 0: torch.Size([1, 256, 288, 288])
+  Level 1: torch.Size([1, 256, 144, 144])
+  Level 2: torch.Size([1, 256, 72, 72])
+  Level 3: torch.Size([1, 256, 36, 36])
+
+  fpn_hidden_states[:-1] = levels 0..2
+  DETR encoder: vision_features=[fpn_hidden_states[:-1][-1]] = level 2
+  Mask decoder backbone: fpn_hidden_states[:-1][:-1] = levels 0..1
+
+  YOUR impl uses:
+    DETR encoder: fpn_hidden[-2] — check if this matches level 2
+    Mask decoder: fpn_hidden[:-1] — check if this matches levels 0..2
+
