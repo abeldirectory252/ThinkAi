@@ -238,9 +238,8 @@ class Sam3DetrDecoder(nn.Module):
         intermediate_presence = []
 
         for layer in self.layers:
-            # Reference uses ONLY (cx, cy), not (cx, cy, w, h)
-            # gen_sineembed_for_position: 256D per coord × 2 coords = 512D
-            query_sine = gen_sineembed_for_position(ref_boxes[:, :, :2])
+            # HF reference passes ALL 4 coordinates (cx,cy,w,h) to produce 4×128=512D
+            query_sine = gen_sineembed_for_position(ref_boxes)
             query_pos = self.ref_point_head(query_sine)
 
             vision_cross_attn_mask = None
