@@ -189,9 +189,9 @@ class Sam3Model(BaseModel):
             num_layers=vc.get("num_hidden_layers", 32),
             image_size=vc.get("image_size", 1008),
             patch_size=vc.get("patch_size", 14),
-            pretrain_image_size=vc.get("pretrain_image_size", 336),
+            pretrain_image_size=vc.get("pretrain_image_size", 1008),  # FIXED: was 336
             fpn_hidden_size=decoder_hidden,
-            window_size=vc.get("window_size", 8),
+            window_size=vc.get("window_size", 24),  # FIXED: was 8
             global_attn_indexes=vc.get("global_attn_indexes", [7, 15, 23, 31]),
             scale_factors=vc.get("scale_factors", [4.0, 2.0, 1.0, 0.5]),
             layer_norm_eps=vc.get("layer_norm_eps", 1e-6),
