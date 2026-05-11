@@ -82,10 +82,11 @@ class Sam3ViTRoPEAttention(nn.Module):
         v = self.v_proj(hidden_states).view(*new_shape).transpose(1, 2)
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb_2d(q, k, cos, sin)
-        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        attn = F.softmax(attn, dim=-1).to(v.dtype)
-        out = torch.matmul(attn, v).transpose(1, 2).contiguous().view(B, H, W, -1)
-        return self.o_proj(out), attn
+        # Use SDPA for memory-efficient attention (Flash Attention / mem-efficient kernels)
+        # This avoids materializing the full [B, heads, seq, seq] attention matrix
+        out = F.scaled_dot_product_attention(q, k, v)
+        out = out.transpose(1, 2).contiguous().view(B, H, W, -1)
+        return self.o_proj(out), None
 
 
 def window_partition(hidden_state, window_size):

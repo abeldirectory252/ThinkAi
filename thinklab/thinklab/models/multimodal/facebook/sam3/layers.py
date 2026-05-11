@@ -84,14 +84,12 @@ class Sam3Attention(nn.Module):
         k = self.k_proj(key).view(B, Nk, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(value).view(B, Nk, self.num_heads, self.head_dim).transpose(1, 2)
         # q,k,v: [B, num_heads, N, head_dim]
-        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        # Use SDPA for memory-efficient attention (Flash Attention / mem-efficient kernels)
         if attention_mask is not None:
-            # Slice to current key length if needed
             attention_mask = attention_mask[..., :Nk]
-            attn = attn + attention_mask
-        attn = F.softmax(attn, dim=-1).to(v.dtype)
-        out = torch.matmul(attn, v).transpose(1, 2).contiguous().view(B, Nq, -1)
-        return self.o_proj(out), attn
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask)
+        out = out.transpose(1, 2).contiguous().view(B, Nq, -1)
+        return self.o_proj(out), None
 
 
 class Sam3SinePositionEmbedding(nn.Module):

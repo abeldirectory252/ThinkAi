@@ -58,11 +58,9 @@ class CLIPAttention(nn.Module):
         q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
-        attn_w = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        if attn_mask is not None:
-            attn_w = attn_w + attn_mask
-        attn_w = F.softmax(attn_w, dim=-1).to(v.dtype)
-        out = torch.matmul(attn_w, v).transpose(1, 2).contiguous().view(B, N, -1)
+        # Use SDPA for memory-efficient attention
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        out = out.transpose(1, 2).contiguous().view(B, N, -1)
         return self.out_proj(out)
 
 
