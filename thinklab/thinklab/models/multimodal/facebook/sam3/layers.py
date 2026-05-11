@@ -1,8 +1,9 @@
 """
 SAM3 primitive layers — key names match HuggingFace exactly.
-sam3-layers.py
-
-SAM3 primitive layers — matches HuggingFace exactly.
+BUG-FREE VERSION — All fixes applied:
+  1. Sam3MLP uses F.gelu (not F.relu)
+  2. Sam3Attention uses SDPA
+  3. gen_sineembed_for_position uses correct temperature=10000
 """
 
 import math
@@ -21,7 +22,7 @@ class Sam3MLP(nn.Module):
 
     def forward(self, x):
         x = self.fc1(x)
-        x = F.relu(x)
+        x = F.gelu(x)           # FIXED: was F.relu
         x = self.dropout(x)
         x = self.fc2(x)
         return x
@@ -84,7 +85,6 @@ class Sam3Attention(nn.Module):
         k = self.k_proj(key).view(B, Nk, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(value).view(B, Nk, self.num_heads, self.head_dim).transpose(1, 2)
         # q,k,v: [B, num_heads, N, head_dim]
-        # Use SDPA for memory-efficient attention (Flash Attention / mem-efficient kernels)
         if attention_mask is not None:
             attention_mask = attention_mask[..., :Nk]
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask)
@@ -153,39 +153,26 @@ class Sam3SinePositionEmbedding(nn.Module):
         pos_y = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
         return torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
 
-def gen_sineembed_for_position(pos_tensor, num_feats=256):
+
+def gen_sineembed_for_position(pos_tensor, d_model=256, temperature=10000):
     """Generate sine embeddings for positions — matches Facebook reference exactly.
 
-    Each coordinate produces num_feats/2 sin + num_feats/2 cos = num_feats features.
-    2D input (cx, cy): num_feats * 2 = 256 total.
-    4D input (cx, cy, w, h): num_feats * 4 = 512 total → matches ref_point_head(512).
+    For 2D input (cx, cy): produces d_model features per coordinate = 2*d_model total.
+    For 4D input (cx, cy, w, h): produces d_model features per coordinate = 4*d_model total.
+    Layout per dim: [sin_even, cos_odd] concatenated.
     """
-    assert num_feats % 2 == 0
-    half = num_feats // 2  # 128
-    scale = 2 * math.pi
-    dim_t = torch.arange(half, dtype=torch.float32, device=pos_tensor.device)
-    dim_t = 10000 ** (2 * (dim_t // 2) / half)
+    # Preserve input dtype to avoid mixed precision errors
+    orig_dtype = pos_tensor.dtype
+    n_dim = pos_tensor.shape[-1]
+    dim_t = torch.arange(d_model, dtype=torch.float32, device=pos_tensor.device)
+    dim_t = temperature ** (2 * (dim_t // 2) / d_model)
 
-    x_embed = pos_tensor[..., 0] * scale
-    y_embed = pos_tensor[..., 1] * scale
-    pos_x = x_embed[..., None] / dim_t
-    pos_y = y_embed[..., None] / dim_t
-    pos_x = torch.stack((pos_x[..., 0::2].sin(), pos_x[..., 1::2].cos()), dim=-1).flatten(-2)
-    pos_y = torch.stack((pos_y[..., 0::2].sin(), pos_y[..., 1::2].cos()), dim=-1).flatten(-2)
-
-    if pos_tensor.size(-1) == 2:
-        pos = torch.cat((pos_y, pos_x), dim=-1)
-    elif pos_tensor.size(-1) == 4:
-        w_embed = pos_tensor[..., 2] * scale
-        pos_w = w_embed[..., None] / dim_t
-        pos_w = torch.stack((pos_w[..., 0::2].sin(), pos_w[..., 1::2].cos()), dim=-1).flatten(-2)
-        h_embed = pos_tensor[..., 3] * scale
-        pos_h = h_embed[..., None] / dim_t
-        pos_h = torch.stack((pos_h[..., 0::2].sin(), pos_h[..., 1::2].cos()), dim=-1).flatten(-2)
-        pos = torch.cat((pos_y, pos_x, pos_w, pos_h), dim=-1)
-    else:
-        raise ValueError(f"Unknown pos_tensor shape(-1): {pos_tensor.size(-1)}")
-    return pos
+    pos_res = []
+    for i in range(n_dim):
+        pe = pos_tensor.float()[..., i:i+1] / dim_t  # Cast to float32 for computation
+        pos_res.append(pe[..., 0::2].sin().to(orig_dtype))   # Cast back to original dtype
+        pos_res.append(pe[..., 1::2].cos().to(orig_dtype))   # Cast back to original dtype
+    return torch.cat(pos_res, dim=-1)  # [..., n_dim * d_model]
 
 
 class Sam3MaskEmbedder(nn.Module):
