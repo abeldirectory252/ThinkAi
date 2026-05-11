@@ -1,10 +1,6 @@
 """
-SAM3 Image Processor — 1008 x 008 normalization + post-processing.
-Uses ImageNet mean/std (not SigLIP).
-SAM3 Image Processor — 1008 x 1008 with ImageNet normalization.
+SAM3 Image Processor — 1008 x 1008 with SAM3 normalization (0.5 mean/std).
 image_processor.py
-
-
 """
 
 from typing import Union, Optional, List
@@ -14,8 +10,10 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
+# SAM3 uses these, NOT ImageNet!
+SAM3_MEAN = (0.5, 0.5, 0.5)
+SAM3_STD = (0.5, 0.5, 0.5)
+RESCALE_FACTOR = 1.0 / 255.0  # 0.00392156862745098
 
 
 def _scale_boxes(boxes, target_sizes):
@@ -29,7 +27,7 @@ def _scale_boxes(boxes, target_sizes):
 
 
 class Sam3ImageProcessor:
-    def __init__(self, image_size=1008, mean=IMAGENET_MEAN, std=IMAGENET_STD):
+    def __init__(self, image_size=1008, mean=SAM3_MEAN, std=SAM3_STD):
         self.image_size = image_size
         self.mean = torch.tensor(mean).view(3, 1, 1)
         self.std = torch.tensor(std).view(3, 1, 1)
@@ -40,9 +38,12 @@ class Sam3ImageProcessor:
         if isinstance(image, np.ndarray):
             image = Image.fromarray(image).convert("RGB")
         orig_w, orig_h = image.size
+        # Resize to 1008x1008
         image = image.resize((self.image_size, self.image_size), Image.BILINEAR)
-        arr = np.array(image).astype(np.float32) / 255.0
+        # Convert to [0,1] float
+        arr = np.array(image).astype(np.float32) * RESCALE_FACTOR  # / 255
         tensor = torch.from_numpy(arr).permute(2, 0, 1)
+        # SAM3 normalization: (x - 0.5) / 0.5
         tensor = (tensor - self.mean) / self.std
         return {
             "pixel_values": tensor.unsqueeze(0).to(dtype),
