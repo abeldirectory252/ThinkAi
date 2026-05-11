@@ -59,11 +59,10 @@ class Sam3DetrEncoderLayer(nn.Module):
         h_pos = h + vision_pos
         attn_out, _ = self.self_attn(h_pos, h_pos, h)
         h = self.dropout(attn_out) + residual
-        # Cross-attention to text/prompt (add pos to query for spatial awareness)
+        # Cross-attention to text/prompt (NO pos added — HF: pos_enc_at_cross_attn_queries=False)
         residual = h
         h = self.layer_norm2(h)
-        h_pos = h + vision_pos  # pos_enc_at_cross_attn_queries=True
-        attn_out, _ = self.cross_attn(h_pos, prompt_feats, prompt_feats,
+        attn_out, _ = self.cross_attn(h, prompt_feats, prompt_feats,
                                        attention_mask=prompt_cross_attn_mask)
         h = self.dropout(attn_out) + residual
         # MLP
