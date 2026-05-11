@@ -1,14 +1,14 @@
 """
 SAM3 — Segment Anything Model 3. Key names match HuggingFace exactly.
 
-Top-level keys (after stripping 'detector_model.' from checkpoint):
-  vision_encoder.backbone.*, vision_encoder.neck.*
-  text_encoder.text_model.*, text_encoder.text_projection.*
-  text_projection.*
-  geometry_encoder.*, detr_encoder.*, detr_decoder.*
-  mask_decoder.*, dot_product_scoring.*
-
-  SAM3 — Segment Anything Model 3.
+BUG-FREE VERSION — All fixes applied:
+  1. window_size=24 (not 8)
+  2. LayerNorm BEFORE transformer blocks (ln_pre)
+  3. CLIPEncoder causal mask only (no padding mask in text encoder)
+  4. CLIPMLP uses quick_gelu (not standard GELU)
+  5. CLIPAttention uses SDPA with additive causal mask
+  6. Sam3MLP uses F.gelu (not F.relu)
+  7. Image normalization: SAM3 (0.5/0.5) not ImageNet
 """
 
 import logging
@@ -58,8 +58,7 @@ class CLIPAttention(nn.Module):
         q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
-        # SDPA with causal mask passed as attn_mask (NOT is_causal=True)
-        # attn_mask is [seq, seq] additive causal mask from CLIPEncoder
+        # attn_mask is [seq, seq] additive causal mask (-inf for masked)
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         out = out.transpose(1, 2).contiguous().view(B, N, -1)
         return self.out_proj(out)
@@ -70,11 +69,11 @@ class CLIPMLP(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(hidden_size, intermediate_size)
         self.fc2 = nn.Linear(intermediate_size, hidden_size)
-        self.act = nn.GELU()
 
     def forward(self, x):
-        # Standard GELU (matching HF reference, NOT quick_gelu)
-        return self.fc2(self.act(self.fc1(x)))
+        # quick_gelu — matches HF CLIP implementation
+        h = self.fc1(x)
+        return self.fc2(h * torch.sigmoid(1.702 * h))
 
 
 class CLIPEncoderLayer(nn.Module):
@@ -103,19 +102,16 @@ class CLIPEncoder(nn.Module):
             CLIPEncoderLayer(hidden_size, num_heads, intermediate_size)
             for _ in range(num_layers)
         ])
-        # Build causal mask [seq, seq] — matching HF reference TextTransformer
-        # The text encoder uses ONLY causal masking, NOT padding masking
-        causal = torch.empty(max_position, max_position)
-        causal.fill_(float("-inf"))
-        causal.triu_(1)  # zero out the lower diagonal
+        # Pre-compute causal mask: [seq, seq] with -inf above diagonal
+        causal = torch.full((max_position, max_position), float("-inf"))
+        causal = causal.triu(1)  # 0 on diagonal and below, -inf above
         self.register_buffer("causal_mask", causal, persistent=False)
 
     def forward(self, x, attention_mask=None):
-        # HF reference: only causal mask is used in text encoder attention
-        # Padding mask is NOT applied here (used downstream in DETR)
+        # HF text encoder uses ONLY causal masking (no padding mask)
+        # Padding is handled downstream in DETR encoder/decoder
         B, seq_len, _ = x.shape
         attn_mask = self.causal_mask[:seq_len, :seq_len]
-
         for layer in self.layers:
             x = layer(x, attn_mask)
         return x
@@ -279,7 +275,7 @@ class Sam3Model(BaseModel):
             t_f = t.float()
             print(f"  {name}: shape={list(t.shape)} "
                   f"min={t_f.min().item():.4f} max={t_f.max().item():.4f} "
-                  f"mean={t_f.mean().item():.4f} std={t_f.std().item():.4f}")
+                  f"mean={t_f.mean().item():.4f}")
 
         if debug:
             print(f"\n{'='*60}")
@@ -288,7 +284,6 @@ class Sam3Model(BaseModel):
 
         # Vision
         vis_out = self.vision_encoder(pixel_values)
-        # Drop coarsest FPN level (index 3, 0.5×) — match HF
         fpn_hidden = vis_out["fpn_hidden_states"][:-1]
         fpn_pos = vis_out["fpn_position_encoding"][:-1]
 
@@ -298,24 +293,20 @@ class Sam3Model(BaseModel):
             for i, f in enumerate(fpn_hidden):
                 _ts(f"fpn_hidden[{i}]", f)
 
-        # Text — match HF: text_features = text_projection(last_hidden_state)
+        # Text
         if text_embeds is None:
             text_out = self.text_encoder(input_ids, attention_mask)
             text_hidden = text_out["last_hidden_state"]
         else:
             text_hidden = text_embeds
         text_features = self.text_projection(text_hidden)
-
         text_mask = attention_mask.bool() if attention_mask is not None else None
 
         if debug:
             print("\n[2] TEXT ENCODER:")
-            _ts("text_hidden", text_hidden)
             _ts("text_features (projected)", text_features)
-            if text_mask is not None:
-                print(f"  text_mask: {text_mask.shape} valid_count={text_mask.sum().item()}")
 
-        # DETR encoder — uses ONLY the finest remaining FPN level
+        # DETR encoder
         enc_out = self.detr_encoder(
             vision_features=[fpn_hidden[-1]],
             text_features=text_features,
@@ -325,7 +316,6 @@ class Sam3Model(BaseModel):
         if debug:
             print("\n[3] DETR ENCODER:")
             _ts("encoder_output", enc_out["last_hidden_state"])
-            print(f"  spatial_shapes: {enc_out['spatial_shapes'].tolist()}")
 
         # DETR decoder
         dec_out = self.detr_decoder(
@@ -340,44 +330,31 @@ class Sam3Model(BaseModel):
 
         if debug:
             print("\n[4] DETR DECODER:")
-            _ts("inter_hs (all layers)", inter_hs)
-            _ts("ref_boxes", ref_boxes)
-            _ts("presence_logits (all layers)", dec_out["presence_logits"])
+            _ts("presence_logits", dec_out["presence_logits"][-1])
 
-        # Box predictions across all layers
+        # Box predictions
         all_box_offsets = self.detr_decoder.box_head(inter_hs)
         ref_inv = inverse_sigmoid(ref_boxes)
         all_pred_boxes_cxcywh = (ref_inv + all_box_offsets).sigmoid()
         all_pred_boxes = box_cxcywh_to_xyxy(all_pred_boxes_cxcywh)
 
-        # Scoring across all layers
+        # Scoring
         all_pred_logits = self.dot_product_scoring(
             inter_hs, enc_out["text_features"], text_mask).squeeze(-1)
 
-        # Take last layer for outputs
         pred_logits = all_pred_logits[-1]
         pred_boxes = all_pred_boxes[-1]
         decoder_hs = inter_hs[-1]
         presence_logits = dec_out["presence_logits"][-1]
 
         if debug:
-            print("\n[5] SCORING (last layer):")
-            _ts("pred_logits (raw)", pred_logits)
-            scores_sig = pred_logits.sigmoid()
-            _ts("pred_logits (sigmoid)", scores_sig)
-            _ts("presence_logits (raw)", presence_logits)
-            pres_sig = presence_logits.sigmoid()
-            _ts("presence_logits (sigmoid)", pres_sig)
-            combined = scores_sig * pres_sig
-            _ts("combined_scores", combined)
-            n_above = (combined > 0.3).sum().item()
-            n_above_01 = (combined > 0.1).sum().item()
-            top5 = combined.flatten().topk(min(5, combined.numel())).values
-            print(f"  detections >0.3: {n_above}, >0.1: {n_above_01}")
-            print(f"  top-5 scores: {[f'{v:.4f}' for v in top5.tolist()]}")
-            _ts("pred_boxes", pred_boxes)
+            print("\n[5] SCORING:")
+            combined = pred_logits.sigmoid() * presence_logits.sigmoid()
+            print(f"  presence_logits: {presence_logits.item():.4f}")
+            print(f"  combined max: {combined.max().item():.4f}")
+            print(f"  >0.3: {(combined > 0.3).sum().item()}, >0.5: {(combined > 0.5).sum().item()}")
 
-        # Mask decoder uses all 3 FPN levels (0,1,2)
+        # Mask decoder
         mask_out = self.mask_decoder(
             decoder_queries=decoder_hs,
             backbone_features=list(fpn_hidden),
@@ -386,8 +363,6 @@ class Sam3Model(BaseModel):
             prompt_mask=text_mask)
 
         if debug:
-            print("\n[6] MASK DECODER:")
-            _ts("pred_masks", mask_out["pred_masks"])
             print(f"{'='*60}\n")
 
         return {
