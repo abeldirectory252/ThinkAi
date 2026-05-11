@@ -83,7 +83,6 @@ class Sam3ViTRoPEAttention(nn.Module):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb_2d(q, k, cos, sin)
         # Use SDPA for memory-efficient attention (Flash Attention / mem-efficient kernels)
-        # This avoids materializing the full [B, heads, seq, seq] attention matrix
         out = F.scaled_dot_product_attention(q, k, v)
         out = out.transpose(1, 2).contiguous().view(B, H, W, -1)
         return self.o_proj(out), None
@@ -225,6 +224,7 @@ class Sam3ViTModel(nn.Module):
         self.patch_size = patch_size if isinstance(patch_size, int) else patch_size[0]
         self.embeddings = Sam3ViTEmbeddings(
             hidden_size, patch_size, pretrain_image_size, dropout=dropout)
+        # This LayerNorm is ln_pre in HF (applied BEFORE transformer blocks)
         self.layer_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
         self.layers = nn.ModuleList([
             Sam3ViTLayer(
@@ -246,10 +246,14 @@ class Sam3ViTModel(nn.Module):
         W = pixel_values.shape[-1] // self.patch_size
         C = x.shape[-1]
         x = x.view(B, H, W, C)
+        
+        # FIXED: LayerNorm BEFORE transformer blocks (HF: ln_pre=True)
+        x = self.layer_norm(x)
+        
         for layer in self.layers:
             x = layer(x)
-        # Final layer norm AFTER all transformer layers (standard ViT pattern)
-        x = self.layer_norm(x)
+        
+        # REMOVED: LayerNorm after layers (HF: ln_post=False → nn.Identity)
         x = x.view(B, H * W, C)
         return {"last_hidden_state": x}
 
