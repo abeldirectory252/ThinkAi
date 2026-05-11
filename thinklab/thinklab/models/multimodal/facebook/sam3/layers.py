@@ -156,6 +156,24 @@ class Sam3SinePositionEmbedding(nn.Module):
         return torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
 
 
+def gen_sineembed_for_position(pos_tensor, d_model=256, temperature=10000):
+    """Generate sine embeddings for positions — matches Facebook reference exactly.
+
+    For 2D input (cx, cy): produces 256 features per coordinate = 512 total.
+    Layout per dim: [sin_even_128, cos_odd_128] concatenated.
+    """
+    n_dim = pos_tensor.shape[-1]
+    dim_t = torch.arange(d_model, dtype=torch.float32, device=pos_tensor.device)
+    dim_t = temperature ** (2 * (dim_t // 2) / d_model)
+
+    pos_res = []
+    for i in range(n_dim):
+        pe = pos_tensor[..., i:i+1] / dim_t  # [..., d_model]
+        pos_res.append(pe[..., 0::2].sin())   # [..., d_model//2]
+        pos_res.append(pe[..., 1::2].cos())   # [..., d_model//2]
+    return torch.cat(pos_res, dim=-1)  # [..., n_dim * d_model]
+
+
 class Sam3MaskEmbedder(nn.Module):
     """Keys: layers (ModuleList of 3 Linear)."""
     def __init__(self, hidden_size=256):

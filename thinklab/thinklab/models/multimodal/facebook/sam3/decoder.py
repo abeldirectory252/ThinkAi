@@ -11,7 +11,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .layers import (Sam3Attention, Sam3MLP, Sam3DecoderMLP,
-                     Sam3SinePositionEmbedding, Sam3MaskEmbedder)
+                     Sam3SinePositionEmbedding, Sam3MaskEmbedder,
+                     gen_sineembed_for_position)
 
 
 def inverse_sigmoid(x, eps=1e-3):
@@ -238,8 +239,9 @@ class Sam3DetrDecoder(nn.Module):
         intermediate_presence = []
 
         for layer in self.layers:
-            ref_input = ref_boxes.unsqueeze(2)
-            query_sine = self.position_encoding.encode_boxes(ref_input[:, :, 0, :])
+            # Reference uses ONLY (cx, cy), not (cx, cy, w, h)
+            # gen_sineembed_for_position: 256D per coord × 2 coords = 512D
+            query_sine = gen_sineembed_for_position(ref_boxes[:, :, :2])
             query_pos = self.ref_point_head(query_sine)
 
             vision_cross_attn_mask = None
